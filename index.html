@@ -69,6 +69,26 @@ async function cloudLoad() {
     });
   } catch(e) { console.warn("cloudLoad:", e.message); return []; }
 }
+
+async function cloudDelete(id) {
+  if (!db) return false;
+  try {
+    await db.collection("jump_tests").doc(String(id)).delete();
+    return true;
+  } catch(e) { console.warn("cloudDelete:", e.message); return false; }
+}
+
+async function cloudDeleteMany(ids) {
+  if (!db || !ids || ids.length === 0) return false;
+  try {
+    for (let i = 0; i < ids.length; i += 450) {
+      const batch = db.batch();
+      ids.slice(i, i + 450).forEach(id => batch.delete(db.collection("jump_tests").doc(String(id))));
+      await batch.commit();
+    }
+    return true;
+  } catch(e) { console.warn("cloudDeleteMany:", e.message); return false; }
+}
 </script>
 
 <script>
@@ -233,6 +253,7 @@ function JumpLab() {
     const [histJT, setHistJT] = useState("CMJ");
     const [syncSt, setSyncSt] = useState("idle");
     const [cloudMsg, setCloudMsg] = useState("");
+    const [isPlaying, setIsPlaying] = useState(false);
     // ── Refs ───────────────────────────────────────────────────────────────
     const previewRef = useRef(null);
     const videoRef = useRef(null);
@@ -259,7 +280,8 @@ function JumpLab() {
     // ── Derivati ───────────────────────────────────────────────────────────
     const isDJ = jumpType === "DJ";
     const frameTime = 1 / fps;
-    const totalF = Math.floor(vidDur * fps);
+    const totalF = Number.isFinite(vidDur) && vidDur > 0 ? Math.floor(vidDur * fps) : 0;
+    const videoReady = totalF > 1;
     const flightF = takeoff !== null && landing !== null ? Math.abs(landing - takeoff) : null;
     const flightSec = flightF !== null ? flightF / fps : null;
     const heightPrev = flightSec !== null ? Math.round(calcH(flightSec) * 1000) / 10 : null;
@@ -318,13 +340,53 @@ function JumpLab() {
     };
     // ── Video review ───────────────────────────────────────────────────────
     useEffect(() => {
-        if (screen === "review" && videoRef.current && videoUrl) {
-            const v = videoRef.current;
-            v.src = videoUrl;
-            v.load();
-            v.onloadedmetadata = () => { setVidDur(v.duration); setCurFrame(0); setTakeoff(null); setLanding(null); setDjFL(null); v.pause(); v.currentTime = 0; };
-        }
-    }, [screen, videoUrl]);
+        if (screen !== "review" || !videoRef.current || !videoUrl)
+            return;
+        const v = videoRef.current;
+        setVidDur(0);
+        setCurFrame(0);
+        setIsPlaying(false);
+        setTakeoff(null);
+        setLanding(null);
+        setDjFL(null);
+        const readDuration = () => {
+            const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+            if (d > 0)
+                setVidDur(d);
+        };
+        const resetVideo = () => {
+            readDuration();
+            v.pause();
+            setIsPlaying(false);
+            try {
+                v.currentTime = 0;
+            }
+            catch (e) { }
+            setCurFrame(0);
+        };
+        const updateFrameFromVideo = () => {
+            const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : vidDur;
+            const maxF = Number.isFinite(d) && d > 0 ? Math.max(0, Math.floor(d * fps) - 1) : 0;
+            const nf = Math.max(0, Math.min(Math.round((v.currentTime || 0) * fps), maxF));
+            setCurFrame(nf);
+        };
+        const onEnded = () => setIsPlaying(false);
+        v.addEventListener("loadedmetadata", resetVideo);
+        v.addEventListener("durationchange", readDuration);
+        v.addEventListener("timeupdate", updateFrameFromVideo);
+        v.addEventListener("seeked", updateFrameFromVideo);
+        v.addEventListener("ended", onEnded);
+        v.src = videoUrl;
+        v.load();
+        return () => {
+            v.pause();
+            v.removeEventListener("loadedmetadata", resetVideo);
+            v.removeEventListener("durationchange", readDuration);
+            v.removeEventListener("timeupdate", updateFrameFromVideo);
+            v.removeEventListener("seeked", updateFrameFromVideo);
+            v.removeEventListener("ended", onEnded);
+        };
+    }, [screen, videoUrl, fps]);
     // ── Caricamento video ricevuto da altri ────────────────────────────────
     const loadVideoFile = useCallback(e => {
         const file = e.target.files && e.target.files[0];
@@ -340,15 +402,33 @@ function JumpLab() {
         setLanding(null);
         setDjFL(null);
         setResults(null);
+        setIsPlaying(false);
         setScreen("review");
         e.target.value = "";
     }, [videoUrl, stopCamera]);
     const goToFrame = useCallback(f => {
+        if (!videoReady)
+            return;
         const cl = Math.max(0, Math.min(f, Math.max(0, totalF - 1)));
         setCurFrame(cl);
-        if (videoRef.current)
+        if (videoRef.current) {
+            videoRef.current.pause();
+            setIsPlaying(false);
             videoRef.current.currentTime = cl * frameTime;
-    }, [totalF, frameTime]);
+        }
+    }, [totalF, frameTime, videoReady]);
+    const togglePlay = useCallback(() => {
+        if (!videoReady || !videoRef.current)
+            return;
+        const v = videoRef.current;
+        if (v.paused) {
+            v.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+        }
+        else {
+            v.pause();
+            setIsPlaying(false);
+        }
+    }, [videoReady]);
     // ── Calcolo e salvataggio ──────────────────────────────────────────────
     const calculate = async () => {
         if (!reviewReady)
@@ -394,6 +474,36 @@ function JumpLab() {
         setSyncSt("saved");
         setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 4000);
     };
+    const deleteTest = async (r, e) => {
+        var _a;
+        (_a = e === null || e === void 0 ? void 0 : e.stopPropagation) === null || _a === void 0 ? void 0 : _a.call(e);
+        if (!window.confirm(`Cancellare la prova ${r.jt} di ${r.name}?`))
+            return;
+        setHistory(h => h.filter(x => String(x.id) !== String(r.id)));
+        if (results && String(results.id) === String(r.id))
+            setResults(null);
+        setSyncSt("saving");
+        const ok = await cloudDelete(r.id);
+        setSyncSt(ok ? "saved" : "local");
+        setCloudMsg(ok ? "Prova cancellata" : "Cancellata solo localmente");
+        setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 3500);
+    };
+    const deleteAthlete = async (name) => {
+        const ids = history.filter(x => x.name === name).map(x => x.id);
+        if (ids.length === 0)
+            return;
+        if (!window.confirm(`Cancellare ${ids.length} prove di ${name}? L'atleta sparirà dallo storico.`))
+            return;
+        setHistory(h => h.filter(x => x.name !== name));
+        setHistAth("");
+        if (results && results.name === name)
+            setResults(null);
+        setSyncSt("saving");
+        const ok = await cloudDeleteMany(ids);
+        setSyncSt(ok ? "saved" : "local");
+        setCloudMsg(ok ? "Atleta cancellato" : "Cancellato solo localmente");
+        setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 3500);
+    };
     // ── Reset ──────────────────────────────────────────────────────────────
     const resetAll = () => {
         if (videoUrl)
@@ -404,7 +514,9 @@ function JumpLab() {
         setDjFL(null);
         setResults(null);
         setCurFrame(0);
+        setVidDur(0);
         setRecSec(0);
+        setIsPlaying(false);
         setScreen("home");
     };
     // ── Stili ──────────────────────────────────────────────────────────────
@@ -418,6 +530,7 @@ function JumpLab() {
         inp: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "11px 14px", fontSize: 15, width: "100%", boxSizing: "border-box", outline: "none" },
         btn: d => ({ background: d ? C.g3 : C.red, color: "#fff", border: "none", borderRadius: 8, padding: "13px", fontSize: 15, fontWeight: 700, cursor: d ? "not-allowed" : "pointer", width: "100%", letterSpacing: 0.8, opacity: d ? 0.4 : 1 }),
         ghost: { background: "transparent", color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "12px", fontSize: 13, cursor: "pointer", width: "100%" },
+        danger: { background: "rgba(239,68,68,0.12)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 8, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
         pill: a => ({ background: a ? C.red : C.g2, color: a ? "#fff" : C.muted, border: `1px solid ${a ? C.red : C.g3}`, borderRadius: 20, padding: "7px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer" }),
         navB: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 6, padding: "11px 10px", fontSize: 14, cursor: "pointer", flex: 1, textAlign: "center" },
         muB: { background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12, padding: "4px 8px" },
@@ -532,20 +645,23 @@ function JumpLab() {
                     "fps")),
             React.createElement("div", { style: T.body },
                 React.createElement("div", { style: { background: "#000", borderRadius: 8, overflow: "hidden", marginBottom: 14 } },
-                    React.createElement("video", { ref: videoRef, style: { width: "100%", display: "block" }, playsInline: true, preload: "auto" })),
+                    React.createElement("video", { ref: videoRef, style: { width: "100%", display: "block" }, playsInline: true, preload: "metadata" })),
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, marginBottom: 8 } },
                     React.createElement("span", null,
                         "Frame: ",
                         React.createElement("strong", { style: { color: C.white } }, curFrame),
                         " / ",
-                        totalF),
+                        videoReady ? totalF : "..."),
                     React.createElement("span", null,
                         "Tempo: ",
                         React.createElement("strong", { style: { color: C.white } },
                             Math.round(curFrame / fps * 1000),
                             " ms"))),
-                React.createElement("input", { type: "range", min: 0, max: Math.max(0, totalF - 1), value: curFrame, onChange: e => goToFrame(parseInt(e.target.value)), style: { marginBottom: 10 } }),
-                React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16 } }, [["«10", -10], ["‹1", -1], ["1›", 1], ["10»", 10]].map(([l, d]) => (React.createElement("button", { key: l, style: T.navB, onClick: () => goToFrame(curFrame + d) }, l)))),
+                !videoReady && React.createElement("div", { style: { fontSize: 12, color: C.muted, marginBottom: 10 } }, "Caricamento video... se resta bloccato, prova a ricaricare il file in formato MP4."),
+                React.createElement("input", { type: "range", min: 0, max: Math.max(1, totalF - 1), value: Math.min(curFrame, Math.max(0, totalF - 1)), disabled: !videoReady, onInput: e => goToFrame(parseInt(e.target.value)), onChange: e => goToFrame(parseInt(e.target.value)), style: { marginBottom: 10, opacity: videoReady ? 1 : 0.35 } }),
+                React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16 } },
+                    React.createElement("button", { style: Object.assign(Object.assign({}, T.navB), { flex: 1.1, opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: togglePlay }, isPlaying ? "⏸ Pausa" : "▶ Play"),
+                    [["«10", -10], ["‹1", -1], ["1›", 1], ["10»", 10]].map(([l, d]) => (React.createElement("button", { key: l, style: Object.assign(Object.assign({}, T.navB), { opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: () => goToFrame(curFrame + d) }, l)))),
                 isDJ ? (React.createElement("div", { style: { marginBottom: 14 } },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6 } }, "DROP JUMP \u2014 segna nell'ordine \u2193"),
                     React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
@@ -781,8 +897,13 @@ function JumpLab() {
                 React.createElement("div", { style: T.card({ marginBottom: 14 }) },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, "Atleti registrati"),
                     React.createElement("div", { style: { fontSize: 22, fontWeight: 900, color: C.red } }, athletes.length),
-                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 4 } }, "I risultati vengono raggruppati automaticamente in base al nome atleta.")),
-                athletes.length > 1 && (React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 4 } }, athletes.map(a => React.createElement("button", { key: a, style: T.pill(selAth === a), onClick: () => setHistAth(a) }, a)))),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 4 } }, "Gli atleti non sono schede separate: vengono creati automaticamente dal nome inserito nei test.")),
+                React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 4 } }, athletes.map(a => React.createElement("button", { key: a, style: T.pill(selAth === a), onClick: () => setHistAth(a) }, a))),
+                selAth && React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", marginBottom: 14 } },
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted } },
+                        "Atleta selezionato: ",
+                        React.createElement("strong", { style: { color: C.white } }, selAth)),
+                    React.createElement("button", { style: T.danger, onClick: () => deleteAthlete(selAth) }, "\uD83D\uDDD1 Cancella atleta")),
                 React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" } }, JT.map(jt => React.createElement("button", { key: jt.id, style: T.pill(histJT === jt.id), onClick: () => setHistJT(jt.id) }, jt.label))),
                 trendData.length > 1 && (React.createElement("div", { style: T.card({ marginBottom: 16 }) },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 10 } },
@@ -799,9 +920,9 @@ function JumpLab() {
                     selAth)) : (filtered.map(r => {
                     const ssc = compSSC(r, history);
                     const asym = compAsym(r, history);
-                    return (React.createElement("div", { key: r.id, style: T.card({ marginBottom: 10 }) },
-                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
-                            React.createElement("div", null,
+                    return (React.createElement("div", { key: r.id, onClick: () => { setResults(r); setScreen("results"); }, style: T.card({ marginBottom: 10, cursor: "pointer", border: `1px solid ${C.g3}` }) },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 } },
+                            React.createElement("div", { style: { flex: 1 } },
                                 React.createElement("div", { style: { fontWeight: 700, fontSize: 14 } }, r.name),
                                 React.createElement("div", { style: { fontSize: 11, color: C.muted } },
                                     r.jt,
@@ -809,6 +930,9 @@ function JumpLab() {
                                     r.date,
                                     " ",
                                     r.ts),
+                                React.createElement("div", { style: { fontSize: 11, color: r.cat.color, marginTop: 4, fontWeight: 700 } },
+                                    "Categoria: ",
+                                    r.cat.label),
                                 r.relPow && React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 2 } },
                                     r.peakPow,
                                     "W \u00B7 ",
@@ -816,22 +940,28 @@ function JumpLab() {
                                     " W/kg"),
                                 r.rsi !== null && React.createElement("div", { style: { fontSize: 11, color: getRSICat(r.rsi)[2], marginTop: 2 } },
                                     "RSI ",
-                                    r.rsi),
+                                    r.rsi,
+                                    " \u00B7 ",
+                                    getRSICat(r.rsi)[1]),
                                 ssc !== null && React.createElement("div", { style: { fontSize: 11, color: ssc >= 105 ? "#22c55e" : "#f97316", marginTop: 2 } },
                                     "SSC ",
                                     ssc,
-                                    "%"),
+                                    "% \u00B7 ",
+                                    ssc >= 110 ? "Ottimo" : ssc >= 105 ? "Buono" : ssc >= 100 ? "Marginale" : "Deficit"),
                                 asym !== null && React.createElement("div", { style: { fontSize: 11, color: asym.val > 15 ? "#ef4444" : asym.val > 10 ? "#f97316" : "#22c55e", marginTop: 2 } },
                                     "Asim. ",
                                     asym.val,
-                                    "%")),
-                            React.createElement("div", { style: { textAlign: "right" } },
+                                    "% \u00B7 ",
+                                    asym.val > 15 ? "Critica" : asym.val > 10 ? "Moderata" : "OK"),
+                                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginTop: 7 } }, "Tocca la scheda per aprire l'analisi completa.")),
+                            React.createElement("div", { style: { textAlign: "right", minWidth: 82 } },
                                 React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: r.cat.color } },
                                     r.hCm,
                                     React.createElement("span", { style: { fontSize: 12 } }, " cm")),
                                 React.createElement("div", { style: { fontSize: 11, color: C.muted } },
                                     r.ftMs,
-                                    "ms")))));
+                                    "ms"),
+                                React.createElement("button", { style: Object.assign(Object.assign({}, T.danger), { marginTop: 8, padding: "6px 8px", fontSize: 11 }), onClick: (e) => deleteTest(r, e) }, "\uD83D\uDDD1")))));
                 })),
                 history.length > 0 && React.createElement("div", { style: { marginTop: 14 } },
                     React.createElement("button", { style: T.ghost, onClick: () => doExport(history) }, "\u2193 Esporta tutto come CSV")))));
