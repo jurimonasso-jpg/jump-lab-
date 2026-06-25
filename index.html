@@ -240,6 +240,7 @@ function JumpLab() {
     const mrRef = useRef(null);
     const chunksRef = useRef([]);
     const timerRef = useRef(null);
+    const fileInputRef = useRef(null);
     // ── localStorage ───────────────────────────────────────────────────────
     useEffect(() => {
         try {
@@ -324,6 +325,24 @@ function JumpLab() {
             v.onloadedmetadata = () => { setVidDur(v.duration); setCurFrame(0); setTakeoff(null); setLanding(null); setDjFL(null); v.pause(); v.currentTime = 0; };
         }
     }, [screen, videoUrl]);
+    // ── Caricamento video ricevuto da altri ────────────────────────────────
+    const loadVideoFile = useCallback(e => {
+        const file = e.target.files && e.target.files[0];
+        if (!file)
+            return;
+        if (videoUrl)
+            URL.revokeObjectURL(videoUrl);
+        stopCamera();
+        setVideoUrl(URL.createObjectURL(file));
+        setVidDur(0);
+        setCurFrame(0);
+        setTakeoff(null);
+        setLanding(null);
+        setDjFL(null);
+        setResults(null);
+        setScreen("review");
+        e.target.value = "";
+    }, [videoUrl, stopCamera]);
     const goToFrame = useCallback(f => {
         const cl = Math.max(0, Math.min(f, Math.max(0, totalF - 1)));
         setCurFrame(cl);
@@ -420,10 +439,9 @@ function JumpLab() {
         return (React.createElement("div", { style: T.app },
             React.createElement("div", { style: T.hdr },
                 React.createElement("span", { style: T.logo }, "\u26A1 JUMP LAB"),
-                history.length > 0 && React.createElement("button", { style: T.muB, onClick: () => setScreen("history") },
-                    "Storico (",
-                    history.length,
-                    ")")),
+                React.createElement("button", { style: T.muB, onClick: () => setScreen("history") },
+                    "Storico/Atleti",
+                    history.length > 0 ? ` (${history.length})` : "")),
             React.createElement("div", { style: T.body },
                 React.createElement("div", { style: T.card({ marginBottom: 20 }) },
                     React.createElement("div", { style: { fontSize: 11, color: C.muted, marginBottom: 12, textTransform: "uppercase", letterSpacing: 1 } }, "\uD83D\uDC64 Profilo atleta"),
@@ -456,6 +474,9 @@ function JumpLab() {
                         (1000 / fps).toFixed(1),
                         " ms/frame")),
                 React.createElement("button", { style: T.btn(false), onClick: () => setScreen("record") }, "\uD83D\uDCF9  AVVIA REGISTRAZIONE"),
+                React.createElement("input", { ref: fileInputRef, type: "file", accept: "video/*", style: { display: "none" }, onChange: loadVideoFile }),
+                React.createElement("div", { style: { marginTop: 10 } },
+                    React.createElement("button", { style: T.ghost, onClick: () => fileInputRef.current && fileInputRef.current.click() }, "\uD83D\uDCC1  CARICA VIDEO RICEVUTO")),
                 React.createElement("div", { style: { marginTop: 10 } },
                     React.createElement("button", { style: T.ghost, onClick: () => setScreen("manual") }, "\u23F1  INSERIMENTO MANUALE")),
                 React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10 } },
@@ -468,7 +489,7 @@ function JumpLab() {
                     React.createElement("br", null),
                     "1. Compila il profilo atleta \u00B7 scegli tipo di salto",
                     React.createElement("br", null),
-                    "2. Registra di lato con camera stabile",
+                    "2. Registra di lato con camera stabile oppure carica un video ricevuto",
                     React.createElement("br", null),
                     "3. Analizza frame per frame \u00B7 segna decollo e atterraggio",
                     React.createElement("br", null),
@@ -737,12 +758,30 @@ function JumpLab() {
         const selAth = histAth || athletes[0] || "";
         const filtered = history.filter(r => r.name === selAth && r.jt === histJT);
         const trendData = [...filtered].reverse().map(r => ({ h: r.hCm, date: r.ts }));
+        if (history.length === 0)
+            return (React.createElement("div", { style: T.app },
+                React.createElement("div", { style: T.hdr },
+                    React.createElement("button", { style: T.muB, onClick: () => setScreen("home") }, "\u2190 Home"),
+                    React.createElement("span", { style: T.logo }, "STORICO"),
+                    React.createElement("span", { style: { fontSize: 10, color: C.muted } }, "0 prove")),
+                React.createElement("div", { style: T.body },
+                    React.createElement("div", { style: { textAlign: "center", color: C.muted, marginTop: 40, lineHeight: 1.6 } },
+                        React.createElement("div", { style: { fontSize: 42, marginBottom: 10 } }, "\uD83D\uDCCA"),
+                        React.createElement("strong", { style: { color: C.white } }, "Nessun risultato salvato"),
+                        React.createElement("br", null),
+                        "Ogni prova salvata crea automaticamente lo storico dell'atleta usando il nome inserito nella Home."),
+                    React.createElement("div", { style: { marginTop: 18 } },
+                        React.createElement("button", { style: T.ghost, onClick: syncCloud }, "\u2601\uFE0F Recupera dati da Firebase")))));
         return (React.createElement("div", { style: T.app },
             React.createElement("div", { style: T.hdr },
                 React.createElement("button", { style: T.muB, onClick: () => setScreen("home") }, "\u2190 Home"),
                 React.createElement("span", { style: T.logo }, "STORICO"),
                 React.createElement("button", { style: Object.assign(Object.assign({}, T.muB), { color: C.red }), onClick: () => doExport(history) }, "\u2193 CSV")),
             React.createElement("div", { style: T.body },
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, "Atleti registrati"),
+                    React.createElement("div", { style: { fontSize: 22, fontWeight: 900, color: C.red } }, athletes.length),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 4 } }, "I risultati vengono raggruppati automaticamente in base al nome atleta.")),
                 athletes.length > 1 && (React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 4 } }, athletes.map(a => React.createElement("button", { key: a, style: T.pill(selAth === a), onClick: () => setHistAth(a) }, a)))),
                 React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" } }, JT.map(jt => React.createElement("button", { key: jt.id, style: T.pill(histJT === jt.id), onClick: () => setHistJT(jt.id) }, jt.label))),
                 trendData.length > 1 && (React.createElement("div", { style: T.card({ marginBottom: 16 }) },
