@@ -14,6 +14,7 @@
     input[type=number]{-moz-appearance:textfield;}
     input[type=range]{accent-color:#E8000D;width:100%;}
     button{-webkit-tap-highlight-color:transparent;}
+    textarea{font-family:inherit;}
     ::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:#141414;}::-webkit-scrollbar-thumb{background:#363636;border-radius:4px;}
   </style>
 </head>
@@ -29,10 +30,6 @@
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 
 <script>
-// ════════════════════════════════════════════════════════════════════════
-// FIREBASE CONFIG — sostituisci con i tuoi valori da Firebase Console
-// Project Settings → Your Apps → Web App → Config
-// ════════════════════════════════════════════════════════════════════════
 const FIREBASE_CONFIG = {
   apiKey:            "AIzaSyD1fVEprn5HmDyIqWcfwQ7HIFUI5yr1r3Y",
   authDomain:        "gestionale-pt.firebaseapp.com",
@@ -52,7 +49,10 @@ async function cloudSave(r) {
   if (!db) return false;
   try {
     await db.collection("jump_tests").doc(String(r.id)).set({
-      ...r, catLabel: r.cat.label, catColor: r.cat.color, cat: null,
+      ...r,
+      catLabel: r.cat?.label || "N/D",
+      catColor: r.cat?.color || "#888",
+      cat: null,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     return true;
@@ -62,7 +62,7 @@ async function cloudSave(r) {
 async function cloudLoad() {
   if (!db) return [];
   try {
-    const snap = await db.collection("jump_tests").orderBy("createdAt","desc").limit(500).get();
+    const snap = await db.collection("jump_tests").orderBy("createdAt","desc").limit(1000).get();
     return snap.docs.map(d => {
       const r = d.data();
       return { ...r, cat: { label: r.catLabel || "N/D", color: r.catColor || "#888" } };
@@ -93,97 +93,194 @@ async function cloudDeleteMany(ids) {
 
 <script>
 const { useState, useRef, useEffect, useCallback } = React;
-// ── Fisica ────────────────────────────────────────────────────────────────
+// ── Fisica / formule ─────────────────────────────────────────────────────
 const G = 9.81;
 const calcH = t => (G * t * t) / 8;
+const calcFlightMsFromCm = cm => Math.round(Math.sqrt((8 * (cm / 100)) / G) * 1000);
 const errCm = f => Math.round((131 / f) * 10) / 10;
 const sayers = (h, kg) => Math.max(0, Math.round(60.7 * h + 45.3 * kg - 2055));
-// ── Tipi di salto ─────────────────────────────────────────────────────────
+// ── Test ────────────────────────────────────────────────────────────────
 const JT = [
-    { id: "CMJ", label: "CMJ", desc: "Countermovement Jump", mk: 2 },
-    { id: "SJ", label: "SJ", desc: "Squat Jump", mk: 2 },
-    { id: "ABK", label: "ABK", desc: "Abalakov", mk: 2 },
-    { id: "DJ", label: "DJ", desc: "Drop Jump + RSI", mk: 3 },
-    { id: "CMJ-DX", label: "CMJ 🦵R", desc: "CMJ Monopodalico Destro", mk: 2 },
-    { id: "CMJ-SX", label: "CMJ 🦵L", desc: "CMJ Monopodalico Sinistro", mk: 2 },
+    { id: "SJ", label: "SJ", desc: "Squat Jump", mk: 2, guide: "Parti fermo in mezzo squat, pausa 2'', niente contromovimento." },
+    { id: "CMJ", label: "CMJ", desc: "Countermovement Jump", mk: 2, guide: "Contromovimento naturale, mani sui fianchi se vuoi standardizzare." },
+    { id: "ABK", label: "ABK", desc: "Abalakov / braccia libere", mk: 2, guide: "Usa liberamente le braccia, massima espressione verticale." },
+    { id: "DJ", label: "DJ", desc: "Drop Jump + RSI", mk: 3, guide: "Scendi dal box, contatto rapido, rimbalzo verticale. Segna atterraggio box, decollo, atterraggio finale." },
+    { id: "CMJ-DX", label: "CMJ 🦵R", desc: "CMJ monopodalico destro", mk: 2, guide: "Stesso setup del CMJ, appoggio solo destro. Cerca controllo e atterraggio stabile." },
+    { id: "CMJ-SX", label: "CMJ 🦵L", desc: "CMJ monopodalico sinistro", mk: 2, guide: "Stesso setup del CMJ, appoggio solo sinistro. Confronto con il destro." },
+    { id: "BOARD", label: "Broad", desc: "Standing Broad Jump / salto in lungo da fermo", mk: 0, guide: "Inserisci la distanza orizzontale saltata da fermo: linea di partenza → tallone più arretrato." },
 ];
-// ── Normative DB ──────────────────────────────────────────────────────────
+const TEST_MAP = Object.fromEntries(JT.map(x => [x.id, x]));
+const BATTERY_ORDER = ["SJ", "CMJ", "ABK", "BOARD", "DJ", "CMJ-DX", "CMJ-SX"];
+const REPS_TARGET = { SJ: 3, CMJ: 3, ABK: 3, DJ: 3, "CMJ-DX": 3, "CMJ-SX": 3, BOARD: 3 };
+const NOTE_PRESETS = [
+    "Tecnica pulita",
+    "Atterraggio stabile",
+    "Atterraggio rumoroso",
+    "Ginocchio in valgo",
+    "Poca coordinazione braccia",
+    "Poca profondità nel caricamento",
+    "Caricamento troppo lento",
+    "Contatto a terra lungo",
+    "Buona reattività",
+    "Buona proiezione orizzontale",
+    "Atterraggio troppo seduto",
+    "Perdita equilibrio all'atterraggio",
+    "Video non perfetto",
+    "Da ripetere per conferma",
+    "Dolore riferito / cautela"
+];
+// ── Normative DB ─────────────────────────────────────────────────────────
 const ND = {
     CMJ: { M: { "18-29": [27, 35, 41, 48], "30-39": [25, 32, 38, 44], "40-49": [21, 28, 34, 40], "50+": [17, 23, 28, 33] }, F: { "18-29": [18, 24, 30, 36], "30-39": [15, 21, 26, 31], "40-49": [12, 17, 22, 27], "50+": [9, 14, 18, 23] } },
     SJ: { M: { "18-29": [24, 31, 37, 43], "30-39": [22, 28, 34, 39], "40-49": [18, 24, 30, 35], "50+": [14, 19, 24, 29] }, F: { "18-29": [16, 22, 27, 32], "30-39": [13, 18, 23, 28], "40-49": [10, 15, 19, 24], "50+": [8, 12, 16, 20] } },
     ABK: { M: { "18-29": [31, 40, 47, 55], "30-39": [28, 37, 44, 51], "40-49": [24, 32, 39, 46], "50+": [19, 26, 32, 38] }, F: { "18-29": [21, 28, 35, 41], "30-39": [17, 24, 30, 36], "40-49": [14, 20, 25, 31], "50+": [11, 16, 21, 26] } },
     DJ: { M: { "18-29": [25, 33, 40, 47], "30-39": [23, 30, 37, 44], "40-49": [19, 26, 32, 38], "50+": [15, 21, 27, 32] }, F: { "18-29": [16, 22, 28, 34], "30-39": [13, 19, 25, 30], "40-49": [10, 16, 21, 26], "50+": [8, 12, 17, 22] } },
     MONO: { M: { "18-29": [19, 26, 32, 38], "30-39": [17, 23, 29, 34], "40-49": [14, 20, 25, 30], "50+": [11, 16, 21, 25] }, F: { "18-29": [13, 18, 23, 28], "30-39": [11, 15, 20, 24], "40-49": [9, 13, 17, 21], "50+": [7, 11, 14, 18] } },
+    BOARD: { M: { "18-29": [170, 205, 235, 265], "30-39": [160, 195, 225, 255], "40-49": [145, 180, 210, 240], "50+": [125, 160, 190, 220] }, F: { "18-29": [120, 150, 175, 200], "30-39": [110, 140, 165, 190], "40-49": [95, 125, 150, 175], "50+": [80, 110, 135, 160] } },
 };
 const NL = ["Scarso", "Nella media", "Buono", "Ottimo", "Eccellente"];
 const NC = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#10b981"];
 const RSI_N = [[0.4, "Scarso", "#ef4444"], [0.7, "Nella media", "#f97316"], [1.1, "Buono", "#eab308"], [1.6, "Ottimo", "#22c55e"], [99, "Eccellente", "#10b981"]];
 const agG = a => { const n = parseInt(a) || 35; return n < 30 ? "18-29" : n < 40 ? "30-39" : n < 50 ? "40-49" : "50+"; };
+const normKey = jt => ["CMJ-DX", "CMJ-SX"].includes(jt) ? "MONO" : (ND[jt] ? jt : "CMJ");
 const getNorms = (jt, sex, age) => {
     var _a, _b;
-    const k = ["CMJ-DX", "CMJ-SX"].includes(jt) ? "MONO" : (ND[jt] ? jt : "CMJ");
     const s = sex === "F" ? "F" : "M";
-    const v = ((_b = (_a = ND[k]) === null || _a === void 0 ? void 0 : _a[s]) === null || _b === void 0 ? void 0 : _b[agG(age)]) || ND.CMJ.M["30-39"];
+    const v = ((_b = (_a = ND[normKey(jt)]) === null || _a === void 0 ? void 0 : _a[s]) === null || _b === void 0 ? void 0 : _b[agG(age)]) || ND.CMJ.M["30-39"];
     return [...v, 99].map((mx, i) => ({ max: mx, label: NL[i], color: NC[i] }));
 };
 const getCat = (h, jt, sex, age) => { const n = getNorms(jt, sex, age); return n.find(x => h < x.max) || n[n.length - 1]; };
 const getRSICat = rsi => RSI_N.find(x => rsi < x[0]) || RSI_N[RSI_N.length - 1];
-// ── Compute dinamico ──────────────────────────────────────────────────────
+const categoryRank = label => Math.max(0, NL.indexOf(label || ""));
+const bestScore = r => {
+    if (!r)
+        return -Infinity;
+    if (r.jt === "DJ" && r.rsi !== null && r.rsi !== undefined)
+        return r.rsi * 100;
+    return Number(r.hCm) || 0;
+};
+const isBoardTest = jt => jt === "BOARD";
+const metricName = jt => isBoardTest(jt) ? "Distanza" : "Altezza";
+const metricBigLabel = jt => isBoardTest(jt) ? "DISTANZA CM" : "CM";
+const metricFocus = jt => isBoardTest(jt) ? "spinta orizzontale, hip hinge, proiezione in avanti e coordinazione braccia-anche" : "potenza verticale";
+const better = (a, b) => bestScore(a) >= bestScore(b) ? a : b;
+const latestOf = arr => [...arr].sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0))[0] || null;
+const firstOf = arr => [...arr].sort((a, b) => (Number(a.id) || 0) - (Number(b.id) || 0))[0] || null;
+const bestOf = arr => arr.reduce((m, r) => !m ? r : better(m, r), null);
+const fmtDelta = d => (d > 0 ? "+" : "") + (Math.round(d * 10) / 10);
+const uniqueAthletes = hist => [...new Set(hist.map(r => r.name || "Atleta"))].sort((a, b) => a.localeCompare(b));
 const compSSC = (r, hist) => {
-    if (!["CMJ", "SJ"].includes(r.jt))
+    if (!r || !["CMJ", "SJ"].includes(r.jt))
         return null;
-    const p = hist.find(h => h.name === r.name && h.jt === (r.jt === "CMJ" ? "SJ" : "CMJ") && h.id !== r.id);
-    if (!p)
+    const all = hist.filter(h => h.name === r.name && ["CMJ", "SJ"].includes(h.jt));
+    const c = bestOf(all.filter(h => h.jt === "CMJ"));
+    const s = bestOf(all.filter(h => h.jt === "SJ"));
+    if (!c || !s || !s.hCm)
         return null;
-    const [c, s] = r.jt === "CMJ" ? [r.hCm, p.hCm] : [p.hCm, r.hCm];
-    return Math.round(c / s * 1000) / 10;
+    return Math.round(c.hCm / s.hCm * 1000) / 10;
 };
 const compAsym = (r, hist) => {
-    if (!["CMJ-DX", "CMJ-SX"].includes(r.jt))
+    if (!r || !["CMJ-DX", "CMJ-SX"].includes(r.jt))
         return null;
-    const p = hist.find(h => h.name === r.name && h.jt === (r.jt === "CMJ-DX" ? "CMJ-SX" : "CMJ-DX"));
-    if (!p)
+    const all = hist.filter(h => h.name === r.name && ["CMJ-DX", "CMJ-SX"].includes(h.jt));
+    const dx = bestOf(all.filter(h => h.jt === "CMJ-DX"));
+    const sx = bestOf(all.filter(h => h.jt === "CMJ-SX"));
+    if (!dx || !sx || !Math.max(dx.hCm, sx.hCm))
         return null;
-    const [dx, sx] = r.jt === "CMJ-DX" ? [r.hCm, p.hCm] : [p.hCm, r.hCm];
-    return { val: Math.round(Math.abs(dx - sx) / Math.max(dx, sx) * 1000) / 10, dx, sx };
+    return { val: Math.round(Math.abs(dx.hCm - sx.hCm) / Math.max(dx.hCm, sx.hCm) * 1000) / 10, dx: dx.hCm, sx: sx.hCm };
 };
 const compFlags = (r, ssc, asym) => {
     const f = [];
-    if (r.rsi !== null) {
+    if (!r)
+        return f;
+    if (r.rsi !== null && r.rsi !== undefined) {
         if (r.rsi < 0.5)
             f.push({ lv: "🚩", tx: `RSI critico (${r.rsi}) — stiffness tendinea molto bassa` });
         else if (r.rsi < 0.8)
-            f.push({ lv: "⚠️", tx: `RSI basso (${r.rsi}) — lavorare su reattività plyometrica` });
+            f.push({ lv: "⚠️", tx: `RSI basso (${r.rsi}) — lavorare su contatti rapidi e reattività` });
     }
     if (ssc !== null) {
         if (ssc < 100)
-            f.push({ lv: "🚩", tx: `SSC invertito (${ssc}%) — SJ > CMJ, verificare tecnica` });
+            f.push({ lv: "🚩", tx: `SSC invertito (${ssc}%) — SJ > CMJ, verificare tecnica o uso del contromovimento` });
         else if (ssc < 105)
-            f.push({ lv: "⚠️", tx: `SSC marginale (${ssc}%) — rinforzare componente eccentrica` });
+            f.push({ lv: "⚠️", tx: `SSC marginale (${ssc}%) — possibile basso utilizzo della componente elastica/eccentrica` });
     }
     if (asym !== null) {
         if (asym.val > 15)
-            f.push({ lv: "🚩", tx: `Asimmetria critica (${asym.val}%) — rischio infortuni elevato` });
+            f.push({ lv: "🚩", tx: `Asimmetria critica (${asym.val}%) — monitorare e contestualizzare con dolore/storia clinica` });
         else if (asym.val > 10)
-            f.push({ lv: "⚠️", tx: `Asimmetria moderata (${asym.val}%) — monitorare` });
+            f.push({ lv: "⚠️", tx: `Asimmetria moderata (${asym.val}%) — utile lavoro monopodalico e retest` });
     }
-    if (r.relPow !== null && r.relPow < 30)
+    if (r.relPow !== null && r.relPow !== undefined && r.relPow < 30)
         f.push({ lv: "⚠️", tx: `Potenza relativa bassa (${r.relPow} W/kg)` });
     return f;
 };
-// ── Export CSV ─────────────────────────────────────────────────────────────
+const analyzeAthlete = (tests, name) => {
+    const by = jt => tests.filter(r => r.jt === jt);
+    const best = Object.fromEntries(JT.map(t => [t.id, bestOf(by(t.id))]));
+    const latest = Object.fromEntries(JT.map(t => [t.id, latestOf(by(t.id))]));
+    const first = Object.fromEntries(JT.map(t => [t.id, firstOf(by(t.id))]));
+    const ssc = best.CMJ && best.SJ ? Math.round(best.CMJ.hCm / best.SJ.hCm * 1000) / 10 : null;
+    const asym = best["CMJ-DX"] && best["CMJ-SX"] ? Math.round(Math.abs(best["CMJ-DX"].hCm - best["CMJ-SX"].hCm) / Math.max(best["CMJ-DX"].hCm, best["CMJ-SX"].hCm) * 1000) / 10 : null;
+    const strengths = [];
+    const weaknesses = [];
+    const focus = [];
+    const missing = BATTERY_ORDER.filter(jt => !best[jt]);
+    ["SJ", "CMJ", "ABK", "BOARD"].forEach(jt => {
+        var _a;
+        const r = best[jt];
+        if (!r)
+            return;
+        const rank = categoryRank((_a = r.cat) === null || _a === void 0 ? void 0 : _a.label);
+        if (rank >= 3)
+            strengths.push(`${TEST_MAP[jt].label}: ${r.cat.label.toLowerCase()} (${r.hCm} cm)`);
+        if (rank <= 1) {
+            weaknesses.push(`${TEST_MAP[jt].label}: ${r.cat.label.toLowerCase()} (${r.hCm} cm)`);
+            focus.push(jt === "SJ" ? "forza concentrica e spinta arti inferiori" : jt === "CMJ" ? "potenza verticale e coordinazione del contromovimento" : jt === "ABK" ? "coordinazione braccia-bacino e trasferimento di forza verticale" : jt === "BOARD" ? metricFocus(jt) : "potenza verticale");
+        }
+    });
+    if (best.DJ) {
+        const rsiCat = best.DJ.rsi !== null && best.DJ.rsi !== undefined ? getRSICat(best.DJ.rsi) : null;
+        if (rsiCat && categoryRank(rsiCat[1]) >= 3)
+            strengths.push(`RSI: ${rsiCat[1].toLowerCase()} (${best.DJ.rsi})`);
+        if (!rsiCat || categoryRank(rsiCat[1]) <= 1) {
+            weaknesses.push(`RSI basso${best.DJ.rsi ? ` (${best.DJ.rsi})` : ""}`);
+            focus.push("stiffness piede-caviglia, pogo jump e contatti rapidi");
+        }
+    }
+    if (ssc !== null) {
+        if (ssc >= 110)
+            strengths.push(`SSC ratio ottimo (${ssc}%)`);
+        else if (ssc < 105) {
+            weaknesses.push(`SSC ratio da migliorare (${ssc}%)`);
+            focus.push("eccentrica, atterraggi controllati e uso del ciclo stiramento-accorciamento");
+        }
+    }
+    if (asym !== null) {
+        if (asym <= 10)
+            strengths.push(`Buona simmetria DX/SX (${asym}%)`);
+        else {
+            weaknesses.push(`Asimmetria DX/SX ${asym}%`);
+            focus.push("lavoro monopodalico, controllo atterraggi e rinforzo lato debole");
+        }
+    }
+    if (missing.length > 0)
+        weaknesses.push(`Batteria incompleta: mancano ${missing.map(j => TEST_MAP[j].label).join(", ")}`);
+    if (focus.length === 0 && tests.length > 0)
+        focus.push("mantenimento qualità di salto, forza generale e retest periodico");
+    return { best, latest, first, ssc, asym, strengths: [...new Set(strengths)], weaknesses: [...new Set(weaknesses)], focus: [...new Set(focus)], missing };
+};
 const doExport = hist => {
-    const H = ["Nome", "Sesso", "Età", "Peso(kg)", "Tipo", "Data", "Ora", "Altezza(cm)", "T.Volo(ms)", "Frame", "T.Contatto(ms)", "PeakPower(W)", "Pot.Rel(W/kg)", "RSI", "Categoria"];
-    const rows = hist.map(r => [r.name, r.sex || "", r.age || "", r.weightKg || "", r.jt, r.date, r.ts, r.hCm, r.ftMs, r.flightF, r.contactMs || "", r.peakPow || "", r.relPow || "", r.rsi || "", r.cat.label]);
-    const csv = "\uFEFF" + [H, ...rows].map(r => r.join(";")).join("\n");
+    const H = ["Nome", "Sesso", "Età", "Peso(kg)", "Tipo", "Metodo", "Data", "Ora", "Misura(cm)", "T.Volo(ms)", "Frame", "T.Contatto(ms)", "PeakPower(W)", "Pot.Rel(W/kg)", "RSI", "Categoria", "Note"];
+    const rows = hist.map(r => { var _a; return [r.name, r.sex || "", r.age || "", r.weightKg || "", r.jt, r.method || "video", r.date, r.ts, r.hCm, r.ftMs || "", r.flightF || "", r.contactMs || "", r.peakPow || "", r.relPow || "", r.rsi || "", ((_a = r.cat) === null || _a === void 0 ? void 0 : _a.label) || "", (r.notes || []).join(" | ") + (r.coachNote ? ` | ${r.coachNote}` : "")]; });
+    const csv = "\uFEFF" + [H, ...rows].map(r => r.map(x => String(x).replaceAll(";", ",")).join(";")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
     a.download = "jumplab_" + new Date().toISOString().slice(0, 10) + ".csv";
     a.click();
 };
-// ── Colori brand ──────────────────────────────────────────────────────────
-const C = { red: "#E8000D", black: "#0A0A0A", white: "#F5F5F0", g2: "#222222", g3: "#363636", muted: "#888888" };
-// ── SVG Mini Chart ────────────────────────────────────────────────────────
+// ── Colori brand ─────────────────────────────────────────────────────────
+const C = { red: "#E8000D", black: "#0A0A0A", white: "#F5F5F0", g1: "#141414", g2: "#222222", g3: "#363636", muted: "#888888" };
 const MiniChart = ({ data }) => {
     if (!data || data.length < 2)
         return null;
@@ -191,7 +288,7 @@ const MiniChart = ({ data }) => {
     const lo = Math.min(...vals) - 4, hi = Math.max(...vals) + 4;
     const W = 260, H = 80;
     const px = i => (i / (data.length - 1)) * W;
-    const py = v => H - ((v - lo) / (hi - lo)) * H;
+    const py = v => H - ((v - lo) / Math.max(1, (hi - lo))) * H;
     const pts = data.map((d, i) => `${px(i).toFixed(1)},${py(d.h).toFixed(1)}`).join(" ");
     return (React.createElement("svg", { viewBox: `0 0 ${W} ${H}`, style: { width: "100%", height: H, display: "block", overflow: "visible" } },
         React.createElement("polyline", { fill: "none", stroke: C.red, strokeWidth: "2.5", strokeLinejoin: "round", points: pts }),
@@ -199,14 +296,13 @@ const MiniChart = ({ data }) => {
             React.createElement("circle", { cx: px(i), cy: py(d.h), r: "3.5", fill: C.red }),
             React.createElement("text", { x: px(i), y: Math.max(10, py(d.h) - 7), textAnchor: "middle", fill: C.white, fontSize: "9", fontWeight: "700" }, d.h))))));
 };
-// ── NormBar component ─────────────────────────────────────────────────────
 const NormBar = ({ jt, sex, age, hCm }) => {
     const norms = getNorms(jt, sex, age);
     const maxBar = Math.max(55, ...norms.filter(n => n.max < 99).map(n => n.max)) + 5;
     return (React.createElement("div", null,
         React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } },
             "Valori normativi \u00B7 ",
-            jt,
+            jt === "BOARD" ? "Standing Broad Jump" : jt,
             " \u00B7 ",
             sex || "M",
             " \u00B7 ",
@@ -221,22 +317,30 @@ const NormBar = ({ jt, sex, age, hCm }) => {
                 React.createElement("div", { style: { flex: 1, height: 16, background: C.g3, borderRadius: 4, overflow: "hidden", position: "relative" } },
                     React.createElement("div", { style: { position: "absolute", left: `${(lo / maxBar) * 100}%`, width: `${((hi - lo) / maxBar) * 100}%`, height: "100%", background: n.color + (isMe ? "cc" : "44") } }),
                     isMe && React.createElement("div", { style: { position: "absolute", left: `${(Math.min(hCm, maxBar) / maxBar) * 100}%`, top: 0, bottom: 0, width: 2, background: "#fff", boxShadow: "0 0 4px #fff" } })),
-                React.createElement("div", { style: { width: 26, fontSize: 10, color: C.muted } }, n.max >= 99 ? `${lo}+` : hi)));
+                React.createElement("div", { style: { width: 32, fontSize: 10, color: C.muted } }, n.max >= 99 ? `${lo}+` : hi)));
         })));
 };
-// ════════════════════════════════════════════════════════════════════════
-// MAIN COMPONENT
-// ════════════════════════════════════════════════════════════════════════
 function JumpLab() {
     var _a, _b;
-    // ── State ──────────────────────────────────────────────────────────────
     const [screen, setScreen] = useState("home");
     const [athlete, setAthlete] = useState("");
     const [sex, setSex] = useState("M");
     const [age, setAge] = useState("");
     const [weightKg, setWeightKg] = useState("");
+    const [sport, setSport] = useState("");
     const [jumpType, setJumpType] = useState("CMJ");
     const [fps, setFps] = useState(60);
+    const [history, setHistory] = useState([]);
+    const [goals, setGoals] = useState({});
+    const [selectedAthlete, setSelectedAthlete] = useState("");
+    const [histAth, setHistAth] = useState("");
+    const [histJT, setHistJT] = useState("CMJ");
+    const [protocol, setProtocol] = useState(null);
+    const [protocolAttempts, setProtocolAttempts] = useState({});
+    const [results, setResults] = useState(null);
+    const [selectedNotes, setSelectedNotes] = useState([]);
+    const [coachNote, setCoachNote] = useState("");
+    const [lastSavedBest, setLastSavedBest] = useState(null);
     const [isRec, setIsRec] = useState(false);
     const [recSec, setRecSec] = useState(0);
     const [camErr, setCamErr] = useState("");
@@ -246,15 +350,13 @@ function JumpLab() {
     const [takeoff, setTakeoff] = useState(null);
     const [landing, setLanding] = useState(null);
     const [djFL, setDjFL] = useState(null);
-    const [results, setResults] = useState(null);
-    const [history, setHistory] = useState([]);
-    const [manualMs, setManualMs] = useState("");
-    const [histAth, setHistAth] = useState("");
-    const [histJT, setHistJT] = useState("CMJ");
+    const [isPlaying, setIsPlaying] = useState(false);
     const [syncSt, setSyncSt] = useState("idle");
     const [cloudMsg, setCloudMsg] = useState("");
-    const [isPlaying, setIsPlaying] = useState(false);
-    // ── Refs ───────────────────────────────────────────────────────────────
+    const [manualMs, setManualMs] = useState("");
+    const [boardHeight, setBoardHeight] = useState("");
+    const [boardReach, setBoardReach] = useState("");
+    const [boardTouch, setBoardTouch] = useState("");
     const previewRef = useRef(null);
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -262,22 +364,31 @@ function JumpLab() {
     const chunksRef = useRef([]);
     const timerRef = useRef(null);
     const fileInputRef = useRef(null);
-    // ── localStorage ───────────────────────────────────────────────────────
-    useEffect(() => {
-        try {
-            const s = localStorage.getItem("jumplab_v2");
-            if (s)
-                setHistory(JSON.parse(s));
+    useEffect(() => { try {
+        const s = localStorage.getItem("jumplab_v14");
+        if (s)
+            setHistory(JSON.parse(s));
+        else {
+            const old = localStorage.getItem("jumplab_v2");
+            if (old)
+                setHistory(JSON.parse(old));
         }
-        catch (e) { }
-    }, []);
-    useEffect(() => {
-        try {
-            localStorage.setItem("jumplab_v2", JSON.stringify(history));
-        }
-        catch (e) { }
-    }, [history]);
-    // ── Derivati ───────────────────────────────────────────────────────────
+    }
+    catch (e) { } }, []);
+    useEffect(() => { try {
+        localStorage.setItem("jumplab_v14", JSON.stringify(history));
+    }
+    catch (e) { } }, [history]);
+    useEffect(() => { try {
+        const s = localStorage.getItem("jumplab_goals_v1");
+        if (s)
+            setGoals(JSON.parse(s));
+    }
+    catch (e) { } }, []);
+    useEffect(() => { try {
+        localStorage.setItem("jumplab_goals_v1", JSON.stringify(goals));
+    }
+    catch (e) { } }, [goals]);
     const isDJ = jumpType === "DJ";
     const frameTime = 1 / fps;
     const totalF = Number.isFinite(vidDur) && vidDur > 0 ? Math.floor(vidDur * fps) : 0;
@@ -289,12 +400,39 @@ function JumpLab() {
     const djCSec = djCF !== null ? djCF / fps : null;
     const rsiPrev = isDJ && djCSec && flightSec ? Math.round(calcH(flightSec) / djCSec * 100) / 100 : null;
     const reviewReady = isDJ ? (djFL !== null && takeoff !== null && landing !== null) : (takeoff !== null && landing !== null);
-    // ── Camera ─────────────────────────────────────────────────────────────
-    const stopCamera = useCallback(() => {
-        var _a;
-        (_a = streamRef.current) === null || _a === void 0 ? void 0 : _a.getTracks().forEach(t => t.stop());
-        streamRef.current = null;
-    }, []);
+    const currentJt = protocol ? protocol.tests[protocol.index] : jumpType;
+    const currentKey = protocol ? `${protocol.id}_${currentJt}` : "free";
+    const currentAttempts = protocol ? (protocolAttempts[currentKey] || []) : [];
+    const currentBest = bestOf(currentAttempts);
+    const targetReps = REPS_TARGET[currentJt] || 3;
+    const T = {
+        app: { minHeight: "100vh", background: C.black, color: C.white, fontFamily: "system-ui,sans-serif", display: "flex", flexDirection: "column", maxWidth: 500, margin: "0 auto" },
+        hdr: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 18px", borderBottom: `1px solid ${C.g2}`, gap: 8 },
+        logo: { fontSize: 18, fontWeight: 900, letterSpacing: 3, color: C.red, whiteSpace: "nowrap" },
+        body: { flex: 1, padding: "18px", overflowY: "auto" },
+        sec: { marginBottom: 20 },
+        lbl: { display: "block", fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1.2 },
+        inp: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "11px 14px", fontSize: 15, width: "100%", boxSizing: "border-box", outline: "none" },
+        btn: d => ({ background: d ? C.g3 : C.red, color: "#fff", border: "none", borderRadius: 8, padding: "13px", fontSize: 15, fontWeight: 800, cursor: d ? "not-allowed" : "pointer", width: "100%", letterSpacing: 0.5, opacity: d ? 0.45 : 1 }),
+        ghost: { background: "transparent", color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "12px", fontSize: 13, cursor: "pointer", width: "100%" },
+        small: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "9px 10px", fontSize: 12, cursor: "pointer" },
+        danger: { background: "rgba(239,68,68,0.12)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 8, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+        pill: a => ({ background: a ? C.red : C.g2, color: a ? "#fff" : C.muted, border: `1px solid ${a ? C.red : C.g3}`, borderRadius: 20, padding: "7px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer" }),
+        navB: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 6, padding: "11px 10px", fontSize: 14, cursor: "pointer", flex: 1, textAlign: "center" },
+        muB: { background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12, padding: "4px 8px" },
+        card: x => (Object.assign({ padding: 14, background: C.g2, borderRadius: 10 }, x)),
+        info: { marginTop: 12, padding: 12, background: C.g2, borderRadius: 8, fontSize: 11, color: C.muted, lineHeight: 1.65 },
+        mk2B: (a, col) => ({ flex: 1, padding: "12px 8px", borderRadius: 8, border: "none", background: a ? col : C.g2, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 12, lineHeight: 1.5 }),
+        area: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "11px 14px", fontSize: 13, width: "100%", minHeight: 90, resize: "vertical", outline: "none", lineHeight: 1.45 },
+    };
+    const SyncBadge = () => {
+        if (syncSt === "idle")
+            return null;
+        const map = { saving: ["☁️ Salvo...", C.muted], saved: ["✅ Salvato", "#22c55e"], local: ["💾 Locale", "#f97316"] };
+        const [txt, col] = map[syncSt] || ["", C.muted];
+        return React.createElement("span", { style: { fontSize: 11, color: col } }, txt);
+    };
+    const stopCamera = useCallback(() => { var _a; (_a = streamRef.current) === null || _a === void 0 ? void 0 : _a.getTracks().forEach(t => t.stop()); streamRef.current = null; }, []);
     const startCamera = useCallback(async () => {
         setCamErr("");
         try {
@@ -311,7 +449,32 @@ function JumpLab() {
     }, [fps]);
     useEffect(() => { if (screen === "record")
         startCamera(); return () => stopCamera(); }, [screen, startCamera, stopCamera]);
-    // ── Registrazione ──────────────────────────────────────────────────────
+    const clearMarkers = () => { setTakeoff(null); setLanding(null); setDjFL(null); setCurFrame(0); setVidDur(0); setIsPlaying(false); };
+    const applyResultNotes = r => (Object.assign(Object.assign({}, r), { notes: selectedNotes, coachNote: coachNote.trim() }));
+    const persistRecord = async (r) => {
+        const rec = Object.assign(Object.assign({}, r), { savedAt: new Date().toISOString() });
+        setHistory(h => [rec, ...h.filter(x => String(x.id) !== String(rec.id))]);
+        setSyncSt("saving");
+        const ok = await cloudSave(rec);
+        setSyncSt(ok ? "saved" : "local");
+        setCloudMsg(ok ? "Salvato" : "Salvato solo localmente");
+        setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 3500);
+        return rec;
+    };
+    const startProtocol = mode => {
+        const tests = mode === "battery" ? BATTERY_ORDER : [jumpType];
+        const id = Date.now();
+        setProtocol({ id, mode, tests, index: 0, athlete: athlete || "Atleta", startedAt: new Date().toISOString() });
+        setProtocolAttempts({});
+        setLastSavedBest(null);
+        setJumpType(tests[0]);
+        setResults(null);
+        setSelectedNotes([]);
+        setCoachNote("");
+        setScreen("protocol");
+    };
+    const endProtocol = () => { setProtocol(null); setProtocolAttempts({}); setLastSavedBest(null); setScreen("home"); };
+    const goProtocolHome = () => { setResults(null); setSelectedNotes([]); setCoachNote(""); clearMarkers(); setScreen("protocol"); };
     const startRec = () => {
         if (!streamRef.current)
             return;
@@ -322,23 +485,15 @@ function JumpLab() {
         mrRef.current = mr;
         mr.ondataavailable = e => { if (e.data.size > 0)
             chunksRef.current.push(e.data); };
-        mr.onstop = () => {
-            setVideoUrl(URL.createObjectURL(new Blob(chunksRef.current, { type: mime || "video/webm" })));
-            setScreen("review");
-        };
+        mr.onstop = () => { if (videoUrl)
+            URL.revokeObjectURL(videoUrl); setVideoUrl(URL.createObjectURL(new Blob(chunksRef.current, { type: mime || "video/webm" }))); setScreen("review"); };
         mr.start(100);
         setIsRec(true);
         setRecSec(0);
         timerRef.current = setInterval(() => setRecSec(s => s + 1), 1000);
     };
-    const stopRec = () => {
-        var _a;
-        if (((_a = mrRef.current) === null || _a === void 0 ? void 0 : _a.state) !== "inactive")
-            mrRef.current.stop();
-        clearInterval(timerRef.current);
-        setIsRec(false);
-    };
-    // ── Video review ───────────────────────────────────────────────────────
+    const stopRec = () => { var _a; if (((_a = mrRef.current) === null || _a === void 0 ? void 0 : _a.state) !== "inactive")
+        mrRef.current.stop(); clearInterval(timerRef.current); setIsRec(false); };
     useEffect(() => {
         if (screen !== "review" || !videoRef.current || !videoUrl)
             return;
@@ -349,45 +504,23 @@ function JumpLab() {
         setTakeoff(null);
         setLanding(null);
         setDjFL(null);
-        const readDuration = () => {
-            const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
-            if (d > 0)
-                setVidDur(d);
-        };
-        const resetVideo = () => {
-            readDuration();
-            v.pause();
-            setIsPlaying(false);
-            try {
-                v.currentTime = 0;
-            }
-            catch (e) { }
-            setCurFrame(0);
-        };
-        const updateFrameFromVideo = () => {
-            const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : vidDur;
-            const maxF = Number.isFinite(d) && d > 0 ? Math.max(0, Math.floor(d * fps) - 1) : 0;
-            const nf = Math.max(0, Math.min(Math.round((v.currentTime || 0) * fps), maxF));
-            setCurFrame(nf);
-        };
+        const readDuration = () => { const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0; if (d > 0)
+            setVidDur(d); };
+        const resetVideo = () => { readDuration(); v.pause(); setIsPlaying(false); try {
+            v.currentTime = 0;
+        }
+        catch (e) { } setCurFrame(0); };
+        const updateFrame = () => { const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : vidDur; const maxF = Number.isFinite(d) && d > 0 ? Math.max(0, Math.floor(d * fps) - 1) : 0; setCurFrame(Math.max(0, Math.min(Math.round((v.currentTime || 0) * fps), maxF))); };
         const onEnded = () => setIsPlaying(false);
         v.addEventListener("loadedmetadata", resetVideo);
         v.addEventListener("durationchange", readDuration);
-        v.addEventListener("timeupdate", updateFrameFromVideo);
-        v.addEventListener("seeked", updateFrameFromVideo);
+        v.addEventListener("timeupdate", updateFrame);
+        v.addEventListener("seeked", updateFrame);
         v.addEventListener("ended", onEnded);
         v.src = videoUrl;
         v.load();
-        return () => {
-            v.pause();
-            v.removeEventListener("loadedmetadata", resetVideo);
-            v.removeEventListener("durationchange", readDuration);
-            v.removeEventListener("timeupdate", updateFrameFromVideo);
-            v.removeEventListener("seeked", updateFrameFromVideo);
-            v.removeEventListener("ended", onEnded);
-        };
+        return () => { v.pause(); v.removeEventListener("loadedmetadata", resetVideo); v.removeEventListener("durationchange", readDuration); v.removeEventListener("timeupdate", updateFrame); v.removeEventListener("seeked", updateFrame); v.removeEventListener("ended", onEnded); };
     }, [screen, videoUrl, fps]);
-    // ── Caricamento video ricevuto da altri ────────────────────────────────
     const loadVideoFile = useCallback(e => {
         const file = e.target.files && e.target.files[0];
         if (!file)
@@ -396,13 +529,8 @@ function JumpLab() {
             URL.revokeObjectURL(videoUrl);
         stopCamera();
         setVideoUrl(URL.createObjectURL(file));
-        setVidDur(0);
-        setCurFrame(0);
-        setTakeoff(null);
-        setLanding(null);
-        setDjFL(null);
+        clearMarkers();
         setResults(null);
-        setIsPlaying(false);
         setScreen("review");
         e.target.value = "";
     }, [videoUrl, stopCamera]);
@@ -416,23 +544,19 @@ function JumpLab() {
             setIsPlaying(false);
             videoRef.current.currentTime = cl * frameTime;
         }
-    }, [totalF, frameTime, videoReady]);
+    }, [videoReady, totalF, frameTime]);
     const togglePlay = useCallback(() => {
         if (!videoReady || !videoRef.current)
             return;
         const v = videoRef.current;
-        if (v.paused) {
+        if (v.paused)
             v.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
-        }
         else {
             v.pause();
             setIsPlaying(false);
         }
     }, [videoReady]);
-    // ── Calcolo e salvataggio ──────────────────────────────────────────────
-    const calculate = async () => {
-        if (!reviewReady)
-            return;
+    const buildVideoResult = () => {
         const ft = flightSec;
         const hCm = Math.round(calcH(ft) * 1000) / 10;
         const wKg = parseFloat(weightKg) || null;
@@ -440,37 +564,97 @@ function JumpLab() {
         const relPow = peakPow && wKg ? Math.round(peakPow / wKg * 10) / 10 : null;
         const rsi = isDJ && djCSec ? Math.round(calcH(ft) / djCSec * 100) / 100 : null;
         const cat = getCat(hCm, jumpType, sex, age);
-        const r = {
-            id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg,
-            jt: jumpType, hCm, ftMs: Math.round(ft * 1000), flightF: Math.abs(landing - takeoff),
-            contactMs: isDJ && djCSec ? Math.round(djCSec * 1000) : null,
-            peakPow, relPow, rsi, cat,
-            ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT"),
-        };
-        setResults(r);
-        setHistory(h => [r, ...h]);
-        setScreen("results");
-        setSyncSt("saving");
-        const ok = await cloudSave(r);
-        setSyncSt(ok ? "saved" : "local");
-        setTimeout(() => setSyncSt("idle"), 3000);
+        return { id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: jumpType, method: "video", hCm, ftMs: Math.round(ft * 1000), flightF: Math.abs(landing - takeoff), contactMs: isDJ && djCSec ? Math.round(djCSec * 1000) : null, peakPow, relPow, rsi, cat, notes: [], coachNote: "", ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") };
     };
-    // ── Sync da cloud ──────────────────────────────────────────────────────
+    const registerAttempt = r => {
+        setSelectedNotes([]);
+        setCoachNote("");
+        setResults(r);
+        if (protocol) {
+            setProtocolAttempts(p => (Object.assign(Object.assign({}, p), { [currentKey]: [...(p[currentKey] || []), r] })));
+        }
+        setScreen("results");
+    };
+    const calculate = () => { if (!reviewReady)
+        return; registerAttempt(buildVideoResult()); };
+    const saveManualTime = () => {
+        const ms = parseFloat(manualMs) || 0;
+        if (!ms)
+            return;
+        const hCm = Math.round(calcH(ms / 1000) * 1000) / 10;
+        const wKg = parseFloat(weightKg) || null;
+        const peakPow = wKg ? sayers(hCm, wKg) : null;
+        const relPow = peakPow && wKg ? Math.round(peakPow / wKg * 10) / 10 : null;
+        const cat = getCat(hCm, jumpType, sex, age);
+        registerAttempt({ id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: jumpType, method: "manual_time", hCm, ftMs: Math.round(ms), flightF: Math.round(ms / 1000 * fps), contactMs: null, peakPow, relPow, rsi: null, cat, notes: [], coachNote: "", ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") });
+        setManualMs("");
+    };
+    const saveBoard = () => {
+        const distanceCm = parseFloat(boardHeight) || 0;
+        if (!distanceCm || distanceCm <= 0)
+            return;
+        const wKg = parseFloat(weightKg) || null;
+        const dCm = Math.round(distanceCm * 10) / 10;
+        const cat = getCat(dCm, "BOARD", sex, age);
+        registerAttempt({ id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: "BOARD", method: "standing_broad_jump", hCm: dCm, ftMs: null, flightF: null, contactMs: null, peakPow: null, relPow: null, rsi: null, cat, notes: [], coachNote: "", boardDistanceCm: dCm, ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") });
+        setBoardHeight("");
+        setBoardReach("");
+        setBoardTouch("");
+    };
+    const saveFreeResult = async () => {
+        if (!results)
+            return;
+        const rec = await persistRecord(applyResultNotes(results));
+        setResults(rec);
+        setSelectedAthlete(rec.name);
+        setScreen("athlete");
+    };
+    const saveBestAndNext = async () => {
+        if (!protocol || !currentBest)
+            return;
+        const best = results && String(results.id) === String(currentBest.id) ? applyResultNotes(currentBest) : currentBest;
+        const rec = await persistRecord(Object.assign(Object.assign({}, best), { isBest: true, protocolMode: protocol.mode, protocolId: protocol.id, protocolStep: protocol.index + 1 }));
+        setLastSavedBest(rec);
+        setProtocolAttempts(p => { const copy = Object.assign({}, p); delete copy[currentKey]; return copy; });
+        setSelectedNotes([]);
+        setCoachNote("");
+        setResults(null);
+        clearMarkers();
+        if (protocol.index < protocol.tests.length - 1) {
+            const nextIndex = protocol.index + 1;
+            const nextJt = protocol.tests[nextIndex];
+            setProtocol(Object.assign(Object.assign({}, protocol), { index: nextIndex }));
+            setJumpType(nextJt);
+            setScreen("protocol");
+        }
+        else {
+            const name = protocol.athlete || rec.name;
+            setProtocol(null);
+            setProtocolAttempts({});
+            setSelectedAthlete(name);
+            setScreen("athlete");
+        }
+    };
+    const repeatAttempt = () => {
+        setResults(null);
+        setSelectedNotes([]);
+        setCoachNote("");
+        clearMarkers();
+        if (currentJt === "BOARD")
+            setScreen("board");
+        else
+            setScreen("protocol");
+    };
     const syncCloud = async () => {
         setSyncSt("saving");
         setCloudMsg("");
         const data = await cloudLoad();
         if (data.length > 0) {
-            setHistory(h => {
-                const ids = new Set(h.map(x => String(x.id)));
-                const news = data.filter(x => !ids.has(String(x.id)));
-                return [...h, ...news].sort((a, b) => b.id - a.id);
-            });
+            setHistory(h => { const ids = new Set(h.map(x => String(x.id))); const news = data.filter(x => !ids.has(String(x.id))); return [...h, ...news].sort((a, b) => (Number(b.id) || 0) - (Number(a.id) || 0)); });
             setCloudMsg(`${data.length} prove caricate`);
         }
-        else {
+        else
             setCloudMsg("Nessun dato cloud");
-        }
         setSyncSt("saved");
         setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 4000);
     };
@@ -490,64 +674,128 @@ function JumpLab() {
     };
     const deleteAthlete = async (name) => {
         const ids = history.filter(x => x.name === name).map(x => x.id);
-        if (ids.length === 0)
+        if (!ids.length)
             return;
-        if (!window.confirm(`Cancellare ${ids.length} prove di ${name}? L'atleta sparirà dallo storico.`))
+        if (!window.confirm(`Cancellare ${ids.length} prove di ${name}?`))
             return;
         setHistory(h => h.filter(x => x.name !== name));
         setHistAth("");
-        if (results && results.name === name)
-            setResults(null);
+        setSelectedAthlete("");
         setSyncSt("saving");
         const ok = await cloudDeleteMany(ids);
         setSyncSt(ok ? "saved" : "local");
         setCloudMsg(ok ? "Atleta cancellato" : "Cancellato solo localmente");
         setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 3500);
     };
-    // ── Reset ──────────────────────────────────────────────────────────────
-    const resetAll = () => {
-        if (videoUrl)
-            URL.revokeObjectURL(videoUrl);
-        setVideoUrl(null);
-        setTakeoff(null);
-        setLanding(null);
-        setDjFL(null);
-        setResults(null);
-        setCurFrame(0);
-        setVidDur(0);
-        setRecSec(0);
-        setIsPlaying(false);
-        setScreen("home");
-    };
-    // ── Stili ──────────────────────────────────────────────────────────────
-    const T = {
-        app: { minHeight: "100vh", background: C.black, color: C.white, fontFamily: "system-ui,sans-serif", display: "flex", flexDirection: "column", maxWidth: 480, margin: "0 auto" },
-        hdr: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 18px", borderBottom: `1px solid ${C.g2}` },
-        logo: { fontSize: 18, fontWeight: 900, letterSpacing: 3, color: C.red },
-        body: { flex: 1, padding: "18px", overflowY: "auto" },
-        sec: { marginBottom: 20 },
-        lbl: { display: "block", fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1.2 },
-        inp: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "11px 14px", fontSize: 15, width: "100%", boxSizing: "border-box", outline: "none" },
-        btn: d => ({ background: d ? C.g3 : C.red, color: "#fff", border: "none", borderRadius: 8, padding: "13px", fontSize: 15, fontWeight: 700, cursor: d ? "not-allowed" : "pointer", width: "100%", letterSpacing: 0.8, opacity: d ? 0.4 : 1 }),
-        ghost: { background: "transparent", color: C.white, border: `1px solid ${C.g3}`, borderRadius: 8, padding: "12px", fontSize: 13, cursor: "pointer", width: "100%" },
-        danger: { background: "rgba(239,68,68,0.12)", color: "#ef4444", border: "1px solid rgba(239,68,68,0.35)", borderRadius: 8, padding: "9px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" },
-        pill: a => ({ background: a ? C.red : C.g2, color: a ? "#fff" : C.muted, border: `1px solid ${a ? C.red : C.g3}`, borderRadius: 20, padding: "7px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer" }),
-        navB: { background: C.g2, color: C.white, border: `1px solid ${C.g3}`, borderRadius: 6, padding: "11px 10px", fontSize: 14, cursor: "pointer", flex: 1, textAlign: "center" },
-        muB: { background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 12, padding: "4px 8px" },
-        card: x => (Object.assign({ padding: 14, background: C.g2, borderRadius: 8 }, x)),
-        info: { marginTop: 12, padding: 12, background: C.g2, borderRadius: 8, fontSize: 11, color: C.muted, lineHeight: 1.65 },
-        mk2B: (a, col) => ({ flex: 1, padding: "12px 8px", borderRadius: 8, border: "none", background: a ? col : C.g2, color: "#fff", cursor: "pointer", fontWeight: 700, fontSize: 12, lineHeight: 1.5 }),
-    };
-    const SyncBadge = () => {
-        if (syncSt === "idle")
+    const resetAll = () => { if (videoUrl)
+        URL.revokeObjectURL(videoUrl); setVideoUrl(null); setResults(null); clearMarkers(); setRecSec(0); setScreen("home"); };
+    const setGoal = (name, key, val) => setGoals(g => (Object.assign(Object.assign({}, g), { [name]: Object.assign(Object.assign({}, (g[name] || {})), { [key]: val }) })));
+    const copyText = txt => { var _a; (_a = navigator.clipboard) === null || _a === void 0 ? void 0 : _a.writeText(txt).catch(() => { }); };
+    const toggleNote = n => setSelectedNotes(a => a.includes(n) ? a.filter(x => x !== n) : [...a, n]);
+    const ResultDetail = ({ r }) => {
+        var _a, _b, _c, _d;
+        if (!r)
             return null;
-        const map = { saving: ["☁️ Salvo...", "#888"], saved: ["✅ Salvato", "#22c55e"], local: ["💾 Solo locale", "#f97316"] };
-        const [txt, col] = map[syncSt] || ["", "#888"];
-        return React.createElement("span", { style: { fontSize: 11, color: col } }, txt);
+        const allH = [...history, ...(protocol ? currentAttempts : [])].filter(Boolean);
+        const ssc = compSSC(r, allH);
+        const asym = compAsym(r, allH);
+        const flags = compFlags(r, ssc, asym);
+        const rsiCat = r.rsi !== null && r.rsi !== undefined ? getRSICat(r.rsi) : null;
+        return (React.createElement(React.Fragment, null,
+            React.createElement("div", { style: { textAlign: "center", marginBottom: 20 } },
+                React.createElement("div", { style: { fontSize: 12, color: C.muted, marginBottom: 2 } },
+                    r.name,
+                    " \u00B7 ",
+                    ((_a = TEST_MAP[r.jt]) === null || _a === void 0 ? void 0 : _a.desc) || r.jt,
+                    r.sex ? ` · ${r.sex}` : "",
+                    r.age ? ` · ${r.age}a` : "",
+                    r.weightKg ? ` · ${r.weightKg}kg` : ""),
+                React.createElement("div", { style: { fontSize: 90, fontWeight: 900, color: C.red, lineHeight: 1, letterSpacing: -2 } }, r.hCm),
+                React.createElement("div", { style: { fontSize: 22, color: C.muted, letterSpacing: 2 } }, metricBigLabel(r.jt)),
+                React.createElement("div", { style: { display: "inline-block", marginTop: 10, padding: "5px 18px", borderRadius: 20, background: (((_b = r.cat) === null || _b === void 0 ? void 0 : _b.color) || C.muted) + "22", color: ((_c = r.cat) === null || _c === void 0 ? void 0 : _c.color) || C.muted, fontWeight: 700, fontSize: 13 } }, ((_d = r.cat) === null || _d === void 0 ? void 0 : _d.label) || "N/D")),
+            React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                React.createElement(NormBar, { jt: r.jt, sex: r.sex, age: r.age, hCm: r.hCm })),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 } },
+                r.ftMs !== null && r.ftMs !== undefined && React.createElement("div", { style: T.card({ textAlign: "center" }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "TEMPO DI VOLO"),
+                    React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
+                        r.ftMs,
+                        React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " ms"))),
+                r.flightF !== null && r.flightF !== undefined && React.createElement("div", { style: T.card({ textAlign: "center" }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "FRAME IN VOLO"),
+                    React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
+                        r.flightF,
+                        React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " f"))),
+                r.contactMs !== null && r.contactMs !== undefined && React.createElement("div", { style: T.card({ textAlign: "center" }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "TEMPO CONTATTO"),
+                    React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
+                        r.contactMs,
+                        React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " ms"))),
+                r.peakPow !== null && r.peakPow !== undefined && React.createElement("div", { style: T.card({ textAlign: "center" }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "PEAK POWER"),
+                    React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
+                        r.peakPow,
+                        React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " W")))),
+            r.relPow !== null && r.relPow !== undefined && React.createElement("div", { style: T.card({ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }) },
+                React.createElement("div", null,
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 2 } }, "POTENZA RELATIVA"),
+                    React.createElement("div", { style: { fontSize: 26, fontWeight: 900, color: C.red } },
+                        r.relPow,
+                        " ",
+                        React.createElement("span", { style: { fontSize: 14, color: C.muted } }, "W/kg"))),
+                React.createElement("div", { style: { fontSize: 11, color: r.relPow >= 55 ? "#10b981" : r.relPow >= 45 ? "#22c55e" : r.relPow >= 35 ? "#eab308" : r.relPow >= 25 ? "#f97316" : "#ef4444" } }, r.relPow >= 55 ? "Eccellente" : r.relPow >= 45 ? "Ottimo" : r.relPow >= 35 ? "Buono" : r.relPow >= 25 ? "Nella media" : "Scarso")),
+            rsiCat && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "RSI \u2014 Reactive Strength Index"),
+                    React.createElement("div", { style: { fontSize: 10, color: rsiCat[2] } }, rsiCat[1])),
+                React.createElement("div", { style: { fontSize: 36, fontWeight: 900, color: rsiCat[2], marginBottom: 8 } }, r.rsi),
+                React.createElement("div", { style: { height: 8, background: C.g3, borderRadius: 4, overflow: "hidden", position: "relative" } },
+                    RSI_N.map((n, i) => { const lo = i === 0 ? 0 : RSI_N[i - 1][0]; const hi = Math.min(n[0], 2); return React.createElement("div", { key: i, style: { position: "absolute", left: `${(lo / 2) * 100}%`, width: `${((hi - lo) / 2) * 100}%`, height: "100%", background: n[2] + "55" } }); }),
+                    React.createElement("div", { style: { position: "absolute", left: `${(Math.min(r.rsi, 2) / 2) * 100}%`, top: 0, bottom: 0, width: 2, background: "#fff" } }))),
+            ssc !== null && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                    React.createElement("div", null,
+                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 2 } }, "SSC RATIO \u2014 CMJ / SJ"),
+                        React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: ssc >= 110 ? "#10b981" : ssc >= 105 ? "#22c55e" : ssc >= 100 ? "#eab308" : "#ef4444" } },
+                            ssc,
+                            "%")),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, textAlign: "right", lineHeight: 1.6 } }, ssc >= 110 ? "Ottimo utilizzo SSC" : ssc >= 105 ? "Buono utilizzo SSC" : ssc >= 100 ? "SSC marginale" : "SSC deficit"))),
+            asym !== null && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Indice di Asimmetria Bilaterale"),
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 8 } },
+                    React.createElement("div", { style: { textAlign: "center" } },
+                        React.createElement("div", { style: { fontSize: 10, color: C.muted } }, "DESTRO"),
+                        React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
+                            asym.dx,
+                            " cm")),
+                    React.createElement("div", { style: { flex: 1, textAlign: "center" } },
+                        React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: asym.val > 15 ? "#ef4444" : asym.val > 10 ? "#f97316" : "#22c55e" } },
+                            asym.val,
+                            "%"),
+                        React.createElement("div", { style: { fontSize: 11, color: C.muted } }, asym.val > 15 ? "🚩 Critica" : asym.val > 10 ? "⚠️ Moderata" : "✓ OK")),
+                    React.createElement("div", { style: { textAlign: "center" } },
+                        React.createElement("div", { style: { fontSize: 10, color: C.muted } }, "SINISTRO"),
+                        React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
+                            asym.sx,
+                            " cm")))),
+            flags.length > 0 && React.createElement("div", { style: T.card({ marginBottom: 14, borderLeft: `3px solid ${flags[0].lv === "🚩" ? "#ef4444" : "#f97316"}` }) },
+                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8 } }, "NOTE CLINICHE AUTOMATICHE"),
+                flags.map((f, i) => React.createElement("div", { key: i, style: { fontSize: 12, color: C.white, marginBottom: 4, lineHeight: 1.4 } },
+                    f.lv,
+                    " ",
+                    f.tx))),
+            ((r.notes && r.notes.length > 0) || r.coachNote) && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8 } }, "NOTE ALLENATORE"),
+                (r.notes || []).map((n, i) => React.createElement("div", { key: i, style: { fontSize: 12, marginBottom: 4 } },
+                    "\u2022 ",
+                    n)),
+                r.coachNote && React.createElement("div", { style: { fontSize: 12, lineHeight: 1.45, marginTop: 6, color: C.white } }, r.coachNote))));
     };
-    // ════════════════════════════════════════════════════════════════════════
+    const NotesEditor = () => (React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Note precompilate"),
+        React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 } }, NOTE_PRESETS.map(n => React.createElement("button", { key: n, style: T.pill(selectedNotes.includes(n)), onClick: () => toggleNote(n) }, n))),
+        React.createElement("textarea", { style: T.area, value: coachNote, onChange: e => setCoachNote(e.target.value), placeholder: "Nota libera: sensazioni, qualit\u00E0 movimento, dolore, indicazioni per il prossimo lavoro..." })));
     // HOME
-    // ════════════════════════════════════════════════════════════════════════
     if (screen === "home")
         return (React.createElement("div", { style: T.app },
             React.createElement("div", { style: T.hdr },
@@ -561,7 +809,7 @@ function JumpLab() {
                     React.createElement("div", { style: T.sec },
                         React.createElement("label", { style: T.lbl }, "Nome"),
                         React.createElement("input", { style: T.inp, value: athlete, onChange: e => setAthlete(e.target.value), placeholder: "Es. Marco Bianchi" })),
-                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 } },
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 10 } },
                         React.createElement("div", null,
                             React.createElement("label", { style: T.lbl }, "Sesso"),
                             React.createElement("div", { style: { display: "flex", gap: 6 } }, ["M", "F"].map(s => React.createElement("button", { key: s, style: T.pill(sex === s), onClick: () => setSex(s) }, s)))),
@@ -570,11 +818,22 @@ function JumpLab() {
                             React.createElement("input", { style: Object.assign(Object.assign({}, T.inp), { padding: "7px 10px" }), type: "number", value: age, onChange: e => setAge(e.target.value), placeholder: "28" })),
                         React.createElement("div", null,
                             React.createElement("label", { style: T.lbl }, "Peso kg"),
-                            React.createElement("input", { style: Object.assign(Object.assign({}, T.inp), { padding: "7px 10px" }), type: "number", value: weightKg, onChange: e => setWeightKg(e.target.value), placeholder: "75" })))),
+                            React.createElement("input", { style: Object.assign(Object.assign({}, T.inp), { padding: "7px 10px" }), type: "number", value: weightKg, onChange: e => setWeightKg(e.target.value), placeholder: "75" }))),
+                    React.createElement("label", { style: T.lbl }, "Sport / Obiettivo"),
+                    React.createElement("input", { style: T.inp, value: sport, onChange: e => setSport(e.target.value), placeholder: "Es. calcio, HYROX, ritorno in forma..." })),
+                React.createElement("div", { style: T.card({ marginBottom: 20, border: `1px solid ${C.red}55` }) },
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "\uD83E\uDDEA Valutazione guidata"),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 } },
+                        React.createElement("button", { style: T.btn(false), onClick: () => startProtocol("battery") }, "BATTERIA COMPLETA"),
+                        React.createElement("button", { style: T.ghost, onClick: () => startProtocol("single") }, "TEST SINGOLO")),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, lineHeight: 1.55 } },
+                        "Batteria consigliata: ",
+                        BATTERY_ORDER.map(j => TEST_MAP[j].label).join(" → "),
+                        ". Ogni test \u00E8 guidato su 3 prove e salva automaticamente solo il migliore.")),
                 React.createElement("div", { style: T.sec },
-                    React.createElement("label", { style: T.lbl }, "Tipo di salto"),
+                    React.createElement("label", { style: T.lbl }, "Test singolo da guidare"),
                     React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7 } }, JT.map(jt => React.createElement("button", { key: jt.id, style: T.pill(jumpType === jt.id), onClick: () => setJumpType(jt.id) }, jt.label))),
-                    React.createElement("div", { style: { fontSize: 12, color: C.muted, marginTop: 6 } }, (_a = JT.find(j => j.id === jumpType)) === null || _a === void 0 ? void 0 : _a.desc)),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted, marginTop: 6 } }, (_a = TEST_MAP[jumpType]) === null || _a === void 0 ? void 0 : _a.desc)),
                 React.createElement("div", { style: T.sec },
                     React.createElement("label", { style: T.lbl }, "Frame rate camera"),
                     React.createElement("div", { style: { display: "flex", gap: 7, flexWrap: "wrap" } }, [30, 60, 120, 240].map(f => React.createElement("button", { key: f, style: T.pill(fps === f), onClick: () => setFps(f) },
@@ -586,37 +845,96 @@ function JumpLab() {
                         " cm/frame \u00B7 ",
                         (1000 / fps).toFixed(1),
                         " ms/frame")),
-                React.createElement("button", { style: T.btn(false), onClick: () => setScreen("record") }, "\uD83D\uDCF9  AVVIA REGISTRAZIONE"),
                 React.createElement("input", { ref: fileInputRef, type: "file", accept: "video/*", style: { display: "none" }, onChange: loadVideoFile }),
-                React.createElement("div", { style: { marginTop: 10 } },
-                    React.createElement("button", { style: T.ghost, onClick: () => fileInputRef.current && fileInputRef.current.click() }, "\uD83D\uDCC1  CARICA VIDEO RICEVUTO")),
-                React.createElement("div", { style: { marginTop: 10 } },
-                    React.createElement("button", { style: T.ghost, onClick: () => setScreen("manual") }, "\u23F1  INSERIMENTO MANUALE")),
-                React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10 } },
-                    React.createElement("button", { style: Object.assign(Object.assign({}, T.ghost), { flex: 1, fontSize: 12, color: C.muted }), onClick: syncCloud },
+                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } },
+                    React.createElement("button", { style: T.ghost, onClick: syncCloud },
                         "\u2601\uFE0F Sincronizza",
                         cloudMsg ? ` (${cloudMsg})` : ""),
-                    history.length > 0 && React.createElement("button", { style: Object.assign(Object.assign({}, T.ghost), { flex: 1, fontSize: 12, color: C.muted }), onClick: () => doExport(history) }, "\u2193 CSV")),
+                    history.length > 0 && React.createElement("button", { style: T.ghost, onClick: () => doExport(history) }, "\u2193 CSV")),
                 React.createElement("div", { style: T.info },
-                    React.createElement("strong", { style: { color: C.white } }, "Come funziona"),
+                    React.createElement("strong", { style: { color: C.white } }, "Nuovo in v1.4.1"),
                     React.createElement("br", null),
-                    "1. Compila il profilo atleta \u00B7 scegli tipo di salto",
-                    React.createElement("br", null),
-                    "2. Registra di lato con camera stabile oppure carica un video ricevuto",
-                    React.createElement("br", null),
-                    "3. Analizza frame per frame \u00B7 segna decollo e atterraggio",
-                    React.createElement("br", null),
-                    "4. Ottieni altezza, potenza, RSI, SSC ratio, asimmetria"))));
-    // ════════════════════════════════════════════════════════════════════════
+                    "Scheda atleta, punti forti/deboli, obiettivi, confronto prima/dopo, note precompilate, Broad Jump manuale e scelta fra batteria completa o test singolo guidato."))));
+    // PROTOCOL
+    if (screen === "protocol" && protocol) {
+        const jt = currentJt;
+        const info = TEST_MAP[jt];
+        const progress = `${protocol.index + 1}/${protocol.tests.length}`;
+        const attempts = currentAttempts;
+        return (React.createElement("div", { style: T.app },
+            React.createElement("div", { style: T.hdr },
+                React.createElement("button", { style: T.muB, onClick: endProtocol }, "\u2190 Esci"),
+                React.createElement("span", { style: T.logo }, protocol.mode === "battery" ? "BATTERIA" : "TEST"),
+                React.createElement(SyncBadge, null)),
+            React.createElement("div", { style: T.body },
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "center", marginBottom: 10 } },
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "Atleta"),
+                            React.createElement("div", { style: { fontSize: 18, fontWeight: 900 } }, protocol.athlete)),
+                        React.createElement("div", { style: { textAlign: "right" } },
+                            React.createElement("div", { style: { fontSize: 10, color: C.muted } }, "Step"),
+                            React.createElement("div", { style: { fontSize: 22, fontWeight: 900, color: C.red } }, progress))),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, lineHeight: 1.55 } }, protocol.tests.map((x, i) => React.createElement("span", { key: x, style: { color: i === protocol.index ? C.white : C.muted, fontWeight: i === protocol.index ? 800 : 400 } },
+                        i > 0 ? " → " : "",
+                        TEST_MAP[x].label)))),
+                React.createElement("div", { style: T.card({ marginBottom: 14, border: `1px solid ${C.red}55` }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 } }, "Test corrente"),
+                    React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: C.red, marginBottom: 4 } }, info.label),
+                    React.createElement("div", { style: { fontSize: 13, color: C.white, marginBottom: 8 } }, info.desc),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted, lineHeight: 1.55 } }, info.guide)),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+                        React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "Prove"),
+                        React.createElement("div", { style: { fontSize: 12, color: attempts.length >= targetReps ? "#22c55e" : C.muted } },
+                            attempts.length,
+                            "/",
+                            targetReps)),
+                    attempts.length === 0 ? React.createElement("div", { style: { fontSize: 12, color: C.muted } }, "Nessun tentativo registrato. Fai 3 prove, poi l'app salver\u00E0 solo il migliore.") : attempts.map((r, i) => React.createElement("div", { key: r.id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i ? `1px solid ${C.g3}` : "none" } },
+                        React.createElement("div", { style: { fontSize: 12 } },
+                            "Prova ",
+                            i + 1,
+                            " \u00B7 ",
+                            r.method === "standing_broad_jump" || r.method === "jump_board" ? "broad jump" : r.method),
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 900, color: currentBest && String(currentBest.id) === String(r.id) ? C.red : C.white } },
+                            r.hCm,
+                            " cm",
+                            r.rsi ? ` · RSI ${r.rsi}` : "",
+                            currentBest && String(currentBest.id) === String(r.id) ? "  🏆" : "")))),
+                currentBest && React.createElement("div", { style: T.card({ marginBottom: 14, background: "rgba(232,0,13,0.12)", border: `1px solid ${C.red}55` }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "Migliore provvisorio"),
+                    React.createElement("div", { style: { fontSize: 26, fontWeight: 900, color: C.red } },
+                        currentBest.hCm,
+                        " cm",
+                        currentBest.rsi ? ` · RSI ${currentBest.rsi}` : ""),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted } }, (_b = currentBest.cat) === null || _b === void 0 ? void 0 :
+                        _b.label,
+                        " \u00B7 prova ",
+                        attempts.findIndex(x => String(x.id) === String(currentBest.id)) + 1)),
+                jt === "BOARD" ? (React.createElement("button", { style: T.btn(false), onClick: () => setScreen("board") }, "\uD83C\uDFC1 INSERISCI BROAD JUMP")) : (React.createElement(React.Fragment, null,
+                    React.createElement("button", { style: T.btn(false), onClick: () => { setJumpType(jt); setScreen("record"); } }, "\uD83D\uDCF9 REGISTRA PROVA"),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 } },
+                        React.createElement("button", { style: T.ghost, onClick: () => fileInputRef.current && fileInputRef.current.click() }, "\uD83D\uDCC1 Carica video"),
+                        React.createElement("button", { style: T.ghost, onClick: () => { setJumpType(jt); setScreen("manual"); } }, "\u23F1 Manuale")))),
+                React.createElement("input", { ref: fileInputRef, type: "file", accept: "video/*", style: { display: "none" }, onChange: loadVideoFile }),
+                React.createElement("div", { style: { marginTop: 14 } },
+                    React.createElement("button", { style: T.btn(!currentBest), disabled: !currentBest, onClick: saveBestAndNext }, protocol.index < protocol.tests.length - 1 ? "💾 SALVA MIGLIORE E CONTINUA" : "💾 SALVA MIGLIORE E CHIUDI")),
+                lastSavedBest && React.createElement("div", { style: T.info },
+                    "Ultimo migliore salvato: ",
+                    React.createElement("strong", { style: { color: C.white } },
+                        lastSavedBest.jt,
+                        " ",
+                        lastSavedBest.hCm,
+                        " cm")))));
+    }
     // RECORD
-    // ════════════════════════════════════════════════════════════════════════
     if (screen === "record")
         return (React.createElement("div", { style: Object.assign(Object.assign({}, T.app), { background: "#000", position: "relative", overflow: "hidden" }) },
             React.createElement("video", { ref: previewRef, style: { width: "100%", height: "100vh", objectFit: "cover", display: "block" }, muted: true, playsInline: true }),
-            camErr && (React.createElement("div", { style: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", background: "rgba(0,0,0,0.94)", borderRadius: 14, padding: "28px 24px", textAlign: "center", maxWidth: 290, color: "#fff" } },
+            camErr && React.createElement("div", { style: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", background: "rgba(0,0,0,0.94)", borderRadius: 14, padding: "28px 24px", textAlign: "center", maxWidth: 290, color: "#fff" } },
                 React.createElement("div", { style: { fontSize: 40, marginBottom: 12 } }, "\uD83D\uDCF7"),
                 React.createElement("div", { style: { fontSize: 13, lineHeight: 1.6, marginBottom: 18 } }, camErr),
-                React.createElement("button", { style: T.ghost, onClick: () => setScreen("home") }, "\u2190 Torna indietro"))),
+                React.createElement("button", { style: T.ghost, onClick: () => protocol ? setScreen("protocol") : setScreen("home") }, "\u2190 Torna indietro")),
             isRec && React.createElement("div", { style: { position: "absolute", top: 20, left: 20, background: "rgba(232,0,13,0.92)", color: "#fff", padding: "5px 13px", borderRadius: 20, fontSize: 13, fontWeight: 700 } },
                 "\u25CF REC ",
                 recSec,
@@ -629,14 +947,12 @@ function JumpLab() {
             React.createElement("div", { style: { position: "absolute", bottom: 0, left: 0, right: 0, padding: "20px 20px 48px", background: "linear-gradient(transparent,rgba(0,0,0,0.88))", display: "flex", flexDirection: "column", alignItems: "center", gap: 14 } },
                 React.createElement("button", { onClick: isRec ? stopRec : startRec, style: { width: 72, height: 72, borderRadius: "50%", background: isRec ? "#fff" : C.red, border: `4px solid ${isRec ? C.red : "#fff"}`, cursor: "pointer", fontSize: 22, display: "flex", alignItems: "center", justifyContent: "center" } }, isRec ? "⏹" : "▶"),
                 React.createElement("div", { style: { color: "rgba(255,255,255,0.72)", fontSize: 12, textAlign: "center" } }, isRec ? "Premi ⏹ per terminare" : "Riprendi di lato · poi premi ▶"),
-                !isRec && React.createElement("button", { style: { background: "none", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 8, padding: "8px 22px", color: "rgba(255,255,255,0.55)", cursor: "pointer", fontSize: 12 }, onClick: () => { stopCamera(); setScreen("home"); } }, "Annulla"))));
-    // ════════════════════════════════════════════════════════════════════════
+                !isRec && React.createElement("button", { style: { background: "none", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 8, padding: "8px 22px", color: "rgba(255,255,255,0.55)", cursor: "pointer", fontSize: 12 }, onClick: () => { stopCamera(); protocol ? setScreen("protocol") : setScreen("home"); } }, "Annulla"))));
     // REVIEW
-    // ════════════════════════════════════════════════════════════════════════
     if (screen === "review")
         return (React.createElement("div", { style: T.app },
             React.createElement("div", { style: T.hdr },
-                React.createElement("button", { style: T.muB, onClick: () => setScreen("record") }, "\u2190 Riregistra"),
+                React.createElement("button", { style: T.muB, onClick: () => protocol ? setScreen("protocol") : setScreen("home") }, "\u2190 Indietro"),
                 React.createElement("span", { style: T.logo }, "ANALISI"),
                 React.createElement("span", { style: { fontSize: 10, color: C.muted } },
                     jumpType,
@@ -645,28 +961,28 @@ function JumpLab() {
                     "fps")),
             React.createElement("div", { style: T.body },
                 React.createElement("div", { style: { background: "#000", borderRadius: 8, overflow: "hidden", marginBottom: 14 } },
-                    React.createElement("video", { ref: videoRef, style: { width: "100%", display: "block" }, playsInline: true, preload: "metadata" })),
+                    React.createElement("video", { ref: videoRef, style: { width: "100%", display: "block" }, playsInline: true, preload: "auto" })),
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, marginBottom: 8 } },
                     React.createElement("span", null,
                         "Frame: ",
                         React.createElement("strong", { style: { color: C.white } }, curFrame),
                         " / ",
-                        videoReady ? totalF : "..."),
+                        totalF || "?"),
                     React.createElement("span", null,
                         "Tempo: ",
                         React.createElement("strong", { style: { color: C.white } },
                             Math.round(curFrame / fps * 1000),
                             " ms"))),
-                !videoReady && React.createElement("div", { style: { fontSize: 12, color: C.muted, marginBottom: 10 } }, "Caricamento video... se resta bloccato, prova a ricaricare il file in formato MP4."),
+                !videoReady && React.createElement("div", { style: { fontSize: 12, color: C.muted, marginBottom: 10 } }, "Carico il video... se resta bloccato, prova MP4 o ricarica il file."),
                 React.createElement("input", { type: "range", min: 0, max: Math.max(1, totalF - 1), value: Math.min(curFrame, Math.max(0, totalF - 1)), disabled: !videoReady, onInput: e => goToFrame(parseInt(e.target.value)), onChange: e => goToFrame(parseInt(e.target.value)), style: { marginBottom: 10, opacity: videoReady ? 1 : 0.35 } }),
                 React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16 } },
                     React.createElement("button", { style: Object.assign(Object.assign({}, T.navB), { flex: 1.1, opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: togglePlay }, isPlaying ? "⏸ Pausa" : "▶ Play"),
-                    [["«10", -10], ["‹1", -1], ["1›", 1], ["10»", 10]].map(([l, d]) => (React.createElement("button", { key: l, style: Object.assign(Object.assign({}, T.navB), { opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: () => goToFrame(curFrame + d) }, l)))),
-                isDJ ? (React.createElement("div", { style: { marginBottom: 14 } },
+                    [["«10", -10], ["‹1", -1], ["1›", 1], ["10»", 10]].map(([l, d]) => React.createElement("button", { key: l, style: Object.assign(Object.assign({}, T.navB), { opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: () => goToFrame(curFrame + d) }, l))),
+                isDJ ? React.createElement("div", { style: { marginBottom: 14 } },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6 } }, "DROP JUMP \u2014 segna nell'ordine \u2193"),
                     React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
                         React.createElement("button", { onClick: () => setDjFL(curFrame), style: T.mk2B(djFL !== null, "#92400e") },
-                            "\uD83D\uDFE1 1. ATTERRAGGIO (box)",
+                            "\uD83D\uDFE1 1. ATTERRAGGIO box",
                             djFL !== null && React.createElement("div", { style: { fontWeight: 400, fontSize: 10, marginTop: 2 } },
                                 "f",
                                 djFL,
@@ -674,7 +990,7 @@ function JumpLab() {
                                 Math.round(djFL / fps * 1000),
                                 "ms")),
                         React.createElement("button", { onClick: () => setTakeoff(curFrame), style: T.mk2B(takeoff !== null, "#15803d") },
-                            "\uD83D\uDFE2 2. DECOLLO (rimbalzo)",
+                            "\uD83D\uDFE2 2. DECOLLO",
                             takeoff !== null && React.createElement("div", { style: { fontWeight: 400, fontSize: 10, marginTop: 2 } },
                                 "f",
                                 takeoff,
@@ -682,13 +998,13 @@ function JumpLab() {
                                 Math.round(takeoff / fps * 1000),
                                 "ms"))),
                     React.createElement("button", { onClick: () => setLanding(curFrame), style: Object.assign(Object.assign({}, T.mk2B(landing !== null, C.red)), { flex: "none", width: "100%", textAlign: "left" }) },
-                        "\uD83D\uDD34 3. ATTERRAGGIO (finale)",
+                        "\uD83D\uDD34 3. ATTERRAGGIO finale",
                         landing !== null && React.createElement("span", { style: { fontWeight: 400, fontSize: 10, marginLeft: 8 } },
                             "f",
                             landing,
                             "|",
                             Math.round(landing / fps * 1000),
-                            "ms")))) : (React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 14 } },
+                            "ms"))) : React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 14 } },
                     React.createElement("button", { onClick: () => setTakeoff(curFrame), style: T.mk2B(takeoff !== null, "#15803d") },
                         "\uD83D\uDFE2 DECOLLO",
                         takeoff !== null && React.createElement("div", { style: { fontWeight: 400, fontSize: 10, marginTop: 2 } },
@@ -704,8 +1020,8 @@ function JumpLab() {
                             landing,
                             "|",
                             Math.round(landing / fps * 1000),
-                            "ms")))),
-                heightPrev !== null && (React.createElement("div", { style: { textAlign: "center", padding: 16, background: C.g2, borderRadius: 8, marginBottom: 14 } },
+                            "ms"))),
+                heightPrev !== null && React.createElement("div", { style: { textAlign: "center", padding: 16, background: C.g2, borderRadius: 8, marginBottom: 14 } },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted } }, isDJ ? `Volo:${flightF}f · Contatto:${djCF || "?"}f · RSI:${rsiPrev || "?"}` : `${flightF}f × ${(1000 / fps).toFixed(1)}ms`),
                     React.createElement("div", { style: { fontSize: 48, fontWeight: 900, color: C.red, lineHeight: 1.1 } },
                         heightPrev.toFixed(1),
@@ -714,168 +1030,178 @@ function JumpLab() {
                         "Tempo di volo: ",
                         Math.round(flightSec * 1000),
                         "ms",
-                        rsiPrev !== null ? ` · RSI: ${rsiPrev}` : ""))),
-                React.createElement("button", { style: T.btn(!reviewReady), disabled: !reviewReady, onClick: calculate }, "CALCOLA RISULTATO \u2192"),
+                        rsiPrev !== null ? ` · RSI: ${rsiPrev}` : "")),
+                React.createElement("button", { style: T.btn(!reviewReady), disabled: !reviewReady, onClick: calculate }, "REGISTRA TENTATIVO \u2192"),
                 React.createElement("div", { style: T.info },
                     React.createElement("strong", { style: { color: C.white } }, "Tip:"),
-                    " \u20391/1\u203A per la precisione frame per frame. Decollo = piedi OFF. Atterraggio = primo contatto."))));
-    // ════════════════════════════════════════════════════════════════════════
-    // RESULTS
-    // ════════════════════════════════════════════════════════════════════════
-    if (screen === "results" && results) {
-        const allH = [...history];
-        const ssc = compSSC(results, allH);
-        const asym = compAsym(results, allH);
-        const flags = compFlags(results, ssc, asym);
-        const rsiCat = results.rsi !== null ? getRSICat(results.rsi) : null;
-        return (React.createElement("div", { style: T.app },
-            React.createElement("div", { style: T.hdr },
-                React.createElement("button", { style: T.muB, onClick: resetAll }, "\u2190 Home"),
-                React.createElement("span", { style: T.logo }, "RISULTATO"),
-                React.createElement(SyncBadge, null)),
-            React.createElement("div", { style: T.body },
-                React.createElement("div", { style: { textAlign: "center", marginBottom: 20 } },
-                    React.createElement("div", { style: { fontSize: 12, color: C.muted, marginBottom: 2 } },
-                        results.name,
-                        " \u00B7 ", (_b = JT.find(j => j.id === results.jt)) === null || _b === void 0 ? void 0 :
-                        _b.desc,
-                        results.sex ? ` · ${results.sex}` : "",
-                        results.age ? ` · ${results.age}a` : "",
-                        results.weightKg ? ` · ${results.weightKg}kg` : ""),
-                    React.createElement("div", { style: { fontSize: 90, fontWeight: 900, color: C.red, lineHeight: 1, letterSpacing: -2 } }, results.hCm),
-                    React.createElement("div", { style: { fontSize: 22, color: C.muted, letterSpacing: 2 } }, "CM"),
-                    React.createElement("div", { style: { display: "inline-block", marginTop: 10, padding: "5px 18px", borderRadius: 20, background: results.cat.color + "22", color: results.cat.color, fontWeight: 700, fontSize: 13 } }, results.cat.label)),
-                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
-                    React.createElement(NormBar, { jt: results.jt, sex: results.sex, age: results.age, hCm: results.hCm })),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 } },
-                    React.createElement("div", { style: T.card({ textAlign: "center" }) },
-                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "TEMPO DI VOLO"),
-                        React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
-                            results.ftMs,
-                            React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " ms"))),
-                    React.createElement("div", { style: T.card({ textAlign: "center" }) },
-                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "FRAME IN VOLO"),
-                        React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
-                            results.flightF,
-                            React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " f"))),
-                    results.contactMs !== null && React.createElement("div", { style: T.card({ textAlign: "center" }) },
-                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "TEMPO CONTATTO"),
-                        React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
-                            results.contactMs,
-                            React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " ms"))),
-                    results.peakPow !== null && React.createElement("div", { style: T.card({ textAlign: "center" }) },
-                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "PEAK POWER"),
-                        React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
-                            results.peakPow,
-                            React.createElement("span", { style: { fontSize: 12, color: C.muted } }, " W")))),
-                results.relPow !== null && (React.createElement("div", { style: T.card({ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }) },
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 2 } }, "POTENZA RELATIVA (Sayers 1999)"),
-                        React.createElement("div", { style: { fontSize: 26, fontWeight: 900, color: C.red } },
-                            results.relPow,
-                            " ",
-                            React.createElement("span", { style: { fontSize: 14, color: C.muted } }, "W/kg"))),
-                    React.createElement("div", { style: { fontSize: 11, color: results.relPow >= 55 ? "#10b981" : results.relPow >= 45 ? "#22c55e" : results.relPow >= 35 ? "#eab308" : results.relPow >= 25 ? "#f97316" : "#ef4444" } }, results.relPow >= 55 ? "Eccellente" : results.relPow >= 45 ? "Ottimo" : results.relPow >= 35 ? "Buono" : results.relPow >= 25 ? "Nella media" : "Scarso"))),
-                results.rsi !== null && (React.createElement("div", { style: T.card({ marginBottom: 14 }) },
-                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
-                        React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "RSI \u2014 Reactive Strength Index"),
-                        React.createElement("div", { style: { fontSize: 10, color: rsiCat[2] } }, rsiCat[1])),
-                    React.createElement("div", { style: { fontSize: 36, fontWeight: 900, color: rsiCat[2], marginBottom: 8 } }, results.rsi),
-                    React.createElement("div", { style: { height: 8, background: C.g3, borderRadius: 4, overflow: "hidden", position: "relative" } },
-                        RSI_N.map((n, i) => { const lo = i === 0 ? 0 : RSI_N[i - 1][0]; const hi = Math.min(n[0], 2); return (React.createElement("div", { key: i, style: { position: "absolute", left: `${(lo / 2) * 100}%`, width: `${((hi - lo) / 2) * 100}%`, height: "100%", background: n[2] + "55" } })); }),
-                        React.createElement("div", { style: { position: "absolute", left: `${(Math.min(results.rsi, 2) / 2) * 100}%`, top: 0, bottom: 0, width: 2, background: "#fff" } })),
-                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 9, color: C.muted, marginTop: 4 } }, ["0", "0.4", "0.7", "1.1", "1.6", "2+"].map(v => React.createElement("span", { key: v }, v))))),
-                ssc !== null && (React.createElement("div", { style: T.card({ marginBottom: 14 }) },
-                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-                        React.createElement("div", null,
-                            React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 2 } }, "SSC RATIO \u2014 CMJ / SJ"),
-                            React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: ssc >= 110 ? "#10b981" : ssc >= 105 ? "#22c55e" : ssc >= 100 ? "#eab308" : "#ef4444" } },
-                                ssc,
-                                "%")),
-                        React.createElement("div", { style: { fontSize: 11, color: C.muted, textAlign: "right", lineHeight: 1.6 } }, ssc >= 110 ? "Ottimo utilizzo SSC" : ssc >= 105 ? "Buono utilizzo SSC" : ssc >= 100 ? "SSC marginale" : "SSC deficit")))),
-                asym !== null && (React.createElement("div", { style: T.card({ marginBottom: 14 }) },
-                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Indice di Asimmetria Bilaterale"),
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 8 } },
-                        React.createElement("div", { style: { textAlign: "center" } },
-                            React.createElement("div", { style: { fontSize: 10, color: C.muted } }, "DESTRO"),
-                            React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
-                                asym.dx,
-                                " cm")),
-                        React.createElement("div", { style: { flex: 1, textAlign: "center" } },
-                            React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: asym.val > 15 ? "#ef4444" : asym.val > 10 ? "#f97316" : "#22c55e" } },
-                                asym.val,
-                                "%"),
-                            React.createElement("div", { style: { fontSize: 11, color: C.muted } }, asym.val > 15 ? "🚩 Critica" : asym.val > 10 ? "⚠️ Moderata" : "✓ OK")),
-                        React.createElement("div", { style: { textAlign: "center" } },
-                            React.createElement("div", { style: { fontSize: 10, color: C.muted } }, "SINISTRO"),
-                            React.createElement("div", { style: { fontSize: 22, fontWeight: 700 } },
-                                asym.sx,
-                                " cm"))),
-                    React.createElement("div", { style: { height: 6, background: C.g3, borderRadius: 3, overflow: "hidden" } },
-                        React.createElement("div", { style: { width: `${Math.min(asym.val / 20 * 100, 100)}%`, height: "100%", background: asym.val > 15 ? "#ef4444" : asym.val > 10 ? "#f97316" : "#22c55e" } })))),
-                flags.length > 0 && (React.createElement("div", { style: T.card({ marginBottom: 14, borderLeft: `3px solid ${flags[0].lv === "🚩" ? "#ef4444" : "#f97316"}` }) },
-                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8 } }, "NOTE CLINICHE"),
-                    flags.map((f, i) => React.createElement("div", { key: i, style: { fontSize: 12, color: C.white, marginBottom: 4, lineHeight: 1.4 } },
-                        f.lv,
-                        " ",
-                        f.tx)))),
-                React.createElement("button", { style: T.btn(false), onClick: () => { setResults(null); setTakeoff(null); setLanding(null); setDjFL(null); setCurFrame(0); setScreen("record"); } }, "\uD83D\uDD01  NUOVA PROVA"),
-                React.createElement("div", { style: { marginTop: 10 } },
-                    React.createElement("button", { style: T.ghost, onClick: resetAll }, "Torna alla Home")),
-                React.createElement("div", { style: T.info }, "h=g\u00D7t\u00B2/8 \u00B7 Peak Power: Sayers et al.(1999) \u00B7 RSI: Flanagan & Comyns(2008) \u00B7 SSC: Bosco et al.(1983) \u00B7 Asimmetria: Bishop et al.(2021)"))));
-    }
-    // ════════════════════════════════════════════════════════════════════════
-    // MANUAL
-    // ════════════════════════════════════════════════════════════════════════
+                    " \u20391/1\u203A per precisione frame per frame. Decollo = piedi OFF. Atterraggio = primo contatto."))));
+    // MANUAL TIME
     if (screen === "manual") {
         const ms = parseFloat(manualMs) || 0;
         const mH = ms > 0 ? Math.round(calcH(ms / 1000) * 1000) / 10 : null;
         const mCat = mH ? getCat(mH, jumpType, sex, age) : null;
-        const mPow = mH && parseFloat(weightKg) ? sayers(mH, parseFloat(weightKg)) : null;
-        const mRel = mPow && parseFloat(weightKg) ? Math.round(mPow / parseFloat(weightKg) * 10) / 10 : null;
-        const save = async () => {
-            if (!mH || !ms)
-                return;
-            const r = { id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: parseFloat(weightKg) || null,
-                jt: jumpType, hCm: mH, ftMs: Math.round(ms), flightF: Math.round(ms / 1000 * fps), contactMs: null,
-                peakPow: mPow, relPow: mRel, rsi: null, cat: mCat,
-                ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") };
-            setResults(r);
-            setHistory(h => [r, ...h]);
-            setScreen("results");
-            await cloudSave(r);
-        };
-        return (React.createElement("div", { style: T.app },
+        return React.createElement("div", { style: T.app },
             React.createElement("div", { style: T.hdr },
-                React.createElement("button", { style: T.muB, onClick: () => setScreen("home") }, "\u2190 Indietro"),
+                React.createElement("button", { style: T.muB, onClick: () => protocol ? setScreen("protocol") : setScreen("home") }, "\u2190 Indietro"),
                 React.createElement("span", { style: T.logo }, "MANUALE"),
                 React.createElement("span", { style: { fontSize: 10, color: C.muted } }, jumpType)),
             React.createElement("div", { style: T.body },
                 React.createElement("div", { style: T.sec },
                     React.createElement("label", { style: T.lbl }, "Tempo di volo in millisecondi"),
                     React.createElement("input", { type: "number", style: T.inp, value: manualMs, onChange: e => setManualMs(e.target.value), placeholder: "Es. 480" }),
-                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 6 } }, "Dato da pedana di forza o altro strumento")),
-                mH !== null && (React.createElement("div", { style: T.card({ textAlign: "center", marginBottom: 18 }) },
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 6 } }, "Dato da pedana, app o altro strumento.")),
+                mH !== null && React.createElement("div", { style: T.card({ textAlign: "center", marginBottom: 18 }) },
                     React.createElement("div", { style: { fontSize: 66, fontWeight: 900, color: C.red, lineHeight: 1 } }, mH),
                     React.createElement("div", { style: { fontSize: 18, color: C.muted } }, "cm"),
-                    mCat && React.createElement("div", { style: { display: "inline-block", marginTop: 8, padding: "5px 18px", borderRadius: 20, background: mCat.color + "22", color: mCat.color, fontWeight: 700 } }, mCat.label),
-                    mRel && React.createElement("div", { style: { fontSize: 14, color: C.muted, marginTop: 8 } },
-                        mPow,
-                        " W \u00B7 ",
-                        mRel,
-                        " W/kg"))),
-                React.createElement("button", { style: T.btn(!mH), disabled: !mH, onClick: save }, "SALVA E VEDI RISULTATO"))));
+                    mCat && React.createElement("div", { style: { display: "inline-block", marginTop: 8, padding: "5px 18px", borderRadius: 20, background: mCat.color + "22", color: mCat.color, fontWeight: 700 } }, mCat.label)),
+                React.createElement("button", { style: T.btn(!mH), disabled: !mH, onClick: saveManualTime }, "REGISTRA TENTATIVO")));
     }
-    // ════════════════════════════════════════════════════════════════════════
-    // HISTORY + TREND
-    // ════════════════════════════════════════════════════════════════════════
+    // BOARD
+    if (screen === "board") {
+        const direct = parseFloat(boardHeight) || 0;
+        const reach = parseFloat(boardReach) || 0;
+        const touch = parseFloat(boardTouch) || 0;
+        const h = direct > 0 ? direct : (touch > 0 && reach > 0 ? Math.round((touch - reach) * 10) / 10 : null);
+        const cat = h ? getCat(h, "BOARD", sex, age) : null;
+        return React.createElement("div", { style: T.app },
+            React.createElement("div", { style: T.hdr },
+                React.createElement("button", { style: T.muB, onClick: () => protocol ? setScreen("protocol") : setScreen("home") }, "\u2190 Indietro"),
+                React.createElement("span", { style: T.logo }, "BOARD"),
+                React.createElement("span", { style: { fontSize: 10, color: C.muted } }, "manuale")),
+            React.createElement("div", { style: T.body },
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Standing Broad Jump / salto in lungo da fermo"),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted, lineHeight: 1.6 } }, "Inserisci la distanza orizzontale del salto in lungo da fermo: dalla linea di partenza al tallone più arretrato all'atterraggio. Fai partire i piedi dietro la linea, salta a due piedi e misura il segno più vicino alla partenza.")),
+                React.createElement("div", { style: T.sec },
+                    React.createElement("label", { style: T.lbl }, "Distanza salto in lungo da fermo (cm)"),
+                    React.createElement("input", { type: "number", style: T.inp, value: boardHeight, onChange: e => setBoardHeight(e.target.value), placeholder: "Es. 210" })),
+                h && h > 0 && React.createElement("div", { style: T.card({ textAlign: "center", marginBottom: 18 }) },
+                    React.createElement("div", { style: { fontSize: 66, fontWeight: 900, color: C.red, lineHeight: 1 } }, h),
+                    React.createElement("div", { style: { fontSize: 18, color: C.muted } }, "cm"),
+                    cat && React.createElement("div", { style: { display: "inline-block", marginTop: 8, padding: "5px 18px", borderRadius: 20, background: cat.color + "22", color: cat.color, fontWeight: 700 } }, cat.label)),
+                React.createElement("button", { style: T.btn(!h || h <= 0), disabled: !h || h <= 0, onClick: saveBoard }, "REGISTRA TENTATIVO BROAD JUMP")));
+    }
+    // RESULTS
+    if (screen === "results" && results) {
+        const isGuided = !!protocol;
+        return React.createElement("div", { style: T.app },
+            React.createElement("div", { style: T.hdr },
+                React.createElement("button", { style: T.muB, onClick: isGuided ? goProtocolHome : resetAll },
+                    "\u2190 ",
+                    isGuided ? "Protocollo" : "Home"),
+                React.createElement("span", { style: T.logo }, "RISULTATO"),
+                React.createElement(SyncBadge, null)),
+            React.createElement("div", { style: T.body },
+                React.createElement(ResultDetail, { r: results }),
+                React.createElement(NotesEditor, null),
+                isGuided ? React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, "Protocollo guidato"),
+                        React.createElement("div", { style: { fontSize: 13, lineHeight: 1.5 } },
+                            "Tentativi ",
+                            currentAttempts.length,
+                            "/",
+                            targetReps,
+                            ". Migliore attuale: ",
+                            React.createElement("strong", { style: { color: C.red } },
+                                (currentBest === null || currentBest === void 0 ? void 0 : currentBest.hCm) || results.hCm,
+                                isBoardTest(currentJt) ? " cm distanza" : " cm",
+                                (currentBest === null || currentBest === void 0 ? void 0 : currentBest.rsi) ? ` · RSI ${currentBest.rsi}` : ""),
+                            ".")),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } },
+                        React.createElement("button", { style: T.ghost, onClick: repeatAttempt }, "\uD83D\uDD01 Ripeti"),
+                        React.createElement("button", { style: T.btn(!currentBest), disabled: !currentBest, onClick: saveBestAndNext }, "\uD83D\uDCBE Migliore e continua"))) : React.createElement("button", { style: T.btn(false), onClick: saveFreeResult }, "\uD83D\uDCBE SALVA RISULTATO"),
+                React.createElement("div", { style: { marginTop: 10 } },
+                    React.createElement("button", { style: T.ghost, onClick: () => { setSelectedAthlete(results.name); setScreen("athlete"); } }, "Apri scheda atleta"))));
+    }
+    // ATHLETE DASHBOARD
+    if (screen === "athlete") {
+        const athletes = uniqueAthletes(history);
+        const name = selectedAthlete || athletes[0] || "";
+        const tests = history.filter(r => r.name === name);
+        const profile = analyzeAthlete(tests, name);
+        const goal = goals[name] || {};
+        const report = `Ciao ${name}, oggi abbiamo aggiornato la tua valutazione Jump Lab.\n\nPunti forti:\n${(profile.strengths.length ? profile.strengths : ["Profilo ancora da completare con altri test."]).map(x => "- " + x).join("\n")}\n\nPunti su cui lavorare:\n${(profile.weaknesses.length ? profile.weaknesses : ["Nessuna criticità evidente dai test disponibili."]).map(x => "- " + x).join("\n")}\n\nFocus allenamento:\n${(profile.focus.length ? profile.focus : ["Mantenere forza generale e qualità del movimento."]).map(x => "- " + x).join("\n")}\n\nAl prossimo retest controlleremo miglioramenti, asimmetrie e qualità dell'esecuzione.`;
+        return React.createElement("div", { style: T.app },
+            React.createElement("div", { style: T.hdr },
+                React.createElement("button", { style: T.muB, onClick: () => setScreen("history") }, "\u2190 Storico"),
+                React.createElement("span", { style: T.logo }, "ATLETA"),
+                React.createElement("button", { style: Object.assign(Object.assign({}, T.muB), { color: C.red }), onClick: () => deleteAthlete(name) }, "\uD83D\uDDD1")),
+            React.createElement("div", { style: T.body }, !name ? React.createElement("div", { style: { textAlign: "center", color: C.muted, marginTop: 40 } }, "Nessun atleta salvato.") : React.createElement(React.Fragment, null,
+                React.createElement("div", { style: T.card({ marginBottom: 14, border: `1px solid ${C.red}55` }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "Scheda atleta"),
+                    React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: C.red } }, name),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted } },
+                        tests.length,
+                        " prove salvate \u00B7 ",
+                        profile.missing.length === 0 ? "Batteria completa" : "Batteria incompleta")),
+                React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 4 } }, athletes.map(a => React.createElement("button", { key: a, style: T.pill(name === a), onClick: () => setSelectedAthlete(a) }, a))),
+                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 } }, BATTERY_ORDER.map(jt => { var _a, _b, _c; const r = profile.best[jt]; return React.createElement("div", { key: jt, style: T.card({ textAlign: "center", opacity: r ? 1 : 0.45 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, TEST_MAP[jt].label),
+                    React.createElement("div", { style: { fontSize: 24, fontWeight: 900, color: r ? (((_a = r.cat) === null || _a === void 0 ? void 0 : _a.color) || C.red) : C.muted } },
+                        r ? `${r.hCm}` : "—",
+                        React.createElement("span", { style: { fontSize: 11, color: C.muted } }, " cm")),
+                    r && React.createElement("div", { style: { fontSize: 10, color: ((_b = r.cat) === null || _b === void 0 ? void 0 : _b.color) || C.muted } }, (_c = r.cat) === null || _c === void 0 ? void 0 : _c.label),
+                    jt === "DJ" && (r === null || r === void 0 ? void 0 : r.rsi) && React.createElement("div", { style: { fontSize: 10, color: getRSICat(r.rsi)[2] } },
+                        "RSI ",
+                        r.rsi)); })),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Punti forti"),
+                    (profile.strengths.length ? profile.strengths : ["Completa la batteria per avere un profilo più preciso."]).map((x, i) => React.createElement("div", { key: i, style: { fontSize: 12, lineHeight: 1.45, marginBottom: 5 } },
+                        "\u2705 ",
+                        x))),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Punti deboli / da monitorare"),
+                    (profile.weaknesses.length ? profile.weaknesses : ["Nessuna criticità evidente dai test disponibili."]).map((x, i) => React.createElement("div", { key: i, style: { fontSize: 12, lineHeight: 1.45, marginBottom: 5 } },
+                        "\u26A0\uFE0F ",
+                        x))),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Focus lavoro consigliato"),
+                    profile.focus.map((x, i) => React.createElement("div", { key: i, style: { fontSize: 12, lineHeight: 1.45, marginBottom: 5 } },
+                        "\uD83C\uDFAF ",
+                        x))),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Obiettivi atleta"),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 } },
+                        ["SJ", "CMJ", "ABK", "BOARD"].map(jt => React.createElement("div", { key: jt },
+                            React.createElement("label", { style: T.lbl },
+                                TEST_MAP[jt].label,
+                                " cm"),
+                            React.createElement("input", { style: Object.assign(Object.assign({}, T.inp), { padding: "8px 10px" }), type: "number", value: goal[jt] || "", onChange: e => setGoal(name, jt, e.target.value), placeholder: "target" }))),
+                        React.createElement("div", null,
+                            React.createElement("label", { style: T.lbl }, "RSI target"),
+                            React.createElement("input", { style: Object.assign(Object.assign({}, T.inp), { padding: "8px 10px" }), type: "number", value: goal.RSI || "", onChange: e => setGoal(name, "RSI", e.target.value), placeholder: "1.2" })),
+                        React.createElement("div", null,
+                            React.createElement("label", { style: T.lbl }, "Asim. max %"),
+                            React.createElement("input", { style: Object.assign(Object.assign({}, T.inp), { padding: "8px 10px" }), type: "number", value: goal.ASYM || "", onChange: e => setGoal(name, "ASYM", e.target.value), placeholder: "10" })))),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Confronto prima \u2192 ultimo"),
+                    BATTERY_ORDER.filter(jt => profile.first[jt] && profile.latest[jt] && String(profile.first[jt].id) !== String(profile.latest[jt].id)).length === 0 ? React.createElement("div", { style: { fontSize: 12, color: C.muted } }, "Servono almeno due test dello stesso tipo per il confronto.") : BATTERY_ORDER.map(jt => { const f = profile.first[jt], l = profile.latest[jt]; if (!f || !l || String(f.id) === String(l.id))
+                        return null; const d = Math.round((l.hCm - f.hCm) * 10) / 10; return React.createElement("div", { key: jt, style: { display: "flex", justifyContent: "space-between", borderTop: `1px solid ${C.g3}`, padding: "8px 0", fontSize: 12 } },
+                        React.createElement("span", null,
+                            TEST_MAP[jt].label,
+                            ": ",
+                            f.hCm,
+                            " \u2192 ",
+                            l.hCm,
+                            " cm"),
+                        React.createElement("strong", { style: { color: d >= 0 ? "#22c55e" : "#ef4444" } },
+                            fmtDelta(d),
+                            " cm")); })),
+                React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "Report WhatsApp"),
+                    React.createElement("textarea", { style: T.area, value: report, readOnly: true }),
+                    React.createElement("div", { style: { marginTop: 10 } },
+                        React.createElement("button", { style: T.ghost, onClick: () => copyText(report) }, "\uD83D\uDCCB Copia report"))))));
+    }
+    // HISTORY
     if (screen === "history") {
-        const athletes = [...new Set(history.map(r => r.name))];
+        const athletes = uniqueAthletes(history);
         const selAth = histAth || athletes[0] || "";
         const filtered = history.filter(r => r.name === selAth && r.jt === histJT);
         const trendData = [...filtered].reverse().map(r => ({ h: r.hCm, date: r.ts }));
         if (history.length === 0)
-            return (React.createElement("div", { style: T.app },
+            return React.createElement("div", { style: T.app },
                 React.createElement("div", { style: T.hdr },
                     React.createElement("button", { style: T.muB, onClick: () => setScreen("home") }, "\u2190 Home"),
                     React.createElement("span", { style: T.logo }, "STORICO"),
@@ -885,10 +1211,10 @@ function JumpLab() {
                         React.createElement("div", { style: { fontSize: 42, marginBottom: 10 } }, "\uD83D\uDCCA"),
                         React.createElement("strong", { style: { color: C.white } }, "Nessun risultato salvato"),
                         React.createElement("br", null),
-                        "Ogni prova salvata crea automaticamente lo storico dell'atleta usando il nome inserito nella Home."),
+                        "Fai una batteria o un test singolo guidato."),
                     React.createElement("div", { style: { marginTop: 18 } },
-                        React.createElement("button", { style: T.ghost, onClick: syncCloud }, "\u2601\uFE0F Recupera dati da Firebase")))));
-        return (React.createElement("div", { style: T.app },
+                        React.createElement("button", { style: T.ghost, onClick: syncCloud }, "\u2601\uFE0F Recupera dati da Firebase"))));
+        return React.createElement("div", { style: T.app },
             React.createElement("div", { style: T.hdr },
                 React.createElement("button", { style: T.muB, onClick: () => setScreen("home") }, "\u2190 Home"),
                 React.createElement("span", { style: T.logo }, "STORICO"),
@@ -897,74 +1223,72 @@ function JumpLab() {
                 React.createElement("div", { style: T.card({ marginBottom: 14 }) },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, "Atleti registrati"),
                     React.createElement("div", { style: { fontSize: 22, fontWeight: 900, color: C.red } }, athletes.length),
-                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 4 } }, "Gli atleti non sono schede separate: vengono creati automaticamente dal nome inserito nei test.")),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 4 } }, "Apri la scheda atleta per vedere punti forti/deboli, obiettivi e confronto prima/dopo.")),
                 React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10, overflowX: "auto", paddingBottom: 4 } }, athletes.map(a => React.createElement("button", { key: a, style: T.pill(selAth === a), onClick: () => setHistAth(a) }, a))),
                 selAth && React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", justifyContent: "space-between", marginBottom: 14 } },
                     React.createElement("div", { style: { fontSize: 11, color: C.muted } },
-                        "Atleta selezionato: ",
+                        "Atleta: ",
                         React.createElement("strong", { style: { color: C.white } }, selAth)),
-                    React.createElement("button", { style: T.danger, onClick: () => deleteAthlete(selAth) }, "\uD83D\uDDD1 Cancella atleta")),
+                    React.createElement("div", { style: { display: "flex", gap: 6 } },
+                        React.createElement("button", { style: T.small, onClick: () => { setSelectedAthlete(selAth); setScreen("athlete"); } }, "Scheda"),
+                        React.createElement("button", { style: T.danger, onClick: () => deleteAthlete(selAth) }, "\uD83D\uDDD1"))),
                 React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" } }, JT.map(jt => React.createElement("button", { key: jt.id, style: T.pill(histJT === jt.id), onClick: () => setHistJT(jt.id) }, jt.label))),
-                trendData.length > 1 && (React.createElement("div", { style: T.card({ marginBottom: 16 }) },
+                trendData.length > 1 && React.createElement("div", { style: T.card({ marginBottom: 16 }) },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 10 } },
                         "TREND ALTEZZA \u00B7 ",
                         selAth,
                         " \u00B7 ",
                         histJT),
-                    React.createElement(MiniChart, { data: trendData }))),
-                filtered.length === 0 ? (React.createElement("div", { style: { textAlign: "center", color: C.muted, marginTop: 40 } },
+                    React.createElement(MiniChart, { data: trendData })),
+                filtered.length === 0 ? React.createElement("div", { style: { textAlign: "center", color: C.muted, marginTop: 40 } },
                     React.createElement("div", { style: { fontSize: 40, marginBottom: 10 } }, "\uD83D\uDCCB"),
                     "Nessuna prova ",
                     histJT,
                     " per ",
-                    selAth)) : (filtered.map(r => {
-                    const ssc = compSSC(r, history);
-                    const asym = compAsym(r, history);
-                    return (React.createElement("div", { key: r.id, onClick: () => { setResults(r); setScreen("results"); }, style: T.card({ marginBottom: 10, cursor: "pointer", border: `1px solid ${C.g3}` }) },
-                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 } },
-                            React.createElement("div", { style: { flex: 1 } },
-                                React.createElement("div", { style: { fontWeight: 700, fontSize: 14 } }, r.name),
-                                React.createElement("div", { style: { fontSize: 11, color: C.muted } },
-                                    r.jt,
-                                    " \u00B7 ",
-                                    r.date,
-                                    " ",
-                                    r.ts),
-                                React.createElement("div", { style: { fontSize: 11, color: r.cat.color, marginTop: 4, fontWeight: 700 } },
-                                    "Categoria: ",
-                                    r.cat.label),
-                                r.relPow && React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 2 } },
-                                    r.peakPow,
-                                    "W \u00B7 ",
-                                    r.relPow,
-                                    " W/kg"),
-                                r.rsi !== null && React.createElement("div", { style: { fontSize: 11, color: getRSICat(r.rsi)[2], marginTop: 2 } },
-                                    "RSI ",
-                                    r.rsi,
-                                    " \u00B7 ",
-                                    getRSICat(r.rsi)[1]),
-                                ssc !== null && React.createElement("div", { style: { fontSize: 11, color: ssc >= 105 ? "#22c55e" : "#f97316", marginTop: 2 } },
-                                    "SSC ",
-                                    ssc,
-                                    "% \u00B7 ",
-                                    ssc >= 110 ? "Ottimo" : ssc >= 105 ? "Buono" : ssc >= 100 ? "Marginale" : "Deficit"),
-                                asym !== null && React.createElement("div", { style: { fontSize: 11, color: asym.val > 15 ? "#ef4444" : asym.val > 10 ? "#f97316" : "#22c55e", marginTop: 2 } },
-                                    "Asim. ",
-                                    asym.val,
-                                    "% \u00B7 ",
-                                    asym.val > 15 ? "Critica" : asym.val > 10 ? "Moderata" : "OK"),
-                                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginTop: 7 } }, "Tocca la scheda per aprire l'analisi completa.")),
-                            React.createElement("div", { style: { textAlign: "right", minWidth: 82 } },
-                                React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: r.cat.color } },
-                                    r.hCm,
-                                    React.createElement("span", { style: { fontSize: 12 } }, " cm")),
-                                React.createElement("div", { style: { fontSize: 11, color: C.muted } },
-                                    r.ftMs,
-                                    "ms"),
-                                React.createElement("button", { style: Object.assign(Object.assign({}, T.danger), { marginTop: 8, padding: "6px 8px", fontSize: 11 }), onClick: (e) => deleteTest(r, e) }, "\uD83D\uDDD1")))));
-                })),
+                    selAth) : filtered.map(r => { var _a, _b, _c; const ssc = compSSC(r, history); const asym = compAsym(r, history); return React.createElement("div", { key: r.id, onClick: () => { setResults(r); setSelectedNotes(r.notes || []); setCoachNote(r.coachNote || ""); setScreen("results"); }, style: T.card({ marginBottom: 10, cursor: "pointer", border: `1px solid ${C.g3}` }) },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 } },
+                        React.createElement("div", { style: { flex: 1 } },
+                            React.createElement("div", { style: { fontWeight: 700, fontSize: 14 } }, r.name),
+                            React.createElement("div", { style: { fontSize: 11, color: C.muted } },
+                                r.jt,
+                                " \u00B7 ",
+                                r.date,
+                                " ",
+                                r.ts,
+                                " \u00B7 ",
+                                r.method || "video"),
+                            React.createElement("div", { style: { fontSize: 11, color: ((_a = r.cat) === null || _a === void 0 ? void 0 : _a.color) || C.muted, marginTop: 4, fontWeight: 700 } },
+                                "Categoria: ",
+                                ((_b = r.cat) === null || _b === void 0 ? void 0 : _b.label) || "N/D"),
+                            r.relPow && React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 2 } },
+                                r.peakPow,
+                                "W \u00B7 ",
+                                r.relPow,
+                                " W/kg"),
+                            r.rsi !== null && r.rsi !== undefined && React.createElement("div", { style: { fontSize: 11, color: getRSICat(r.rsi)[2], marginTop: 2 } },
+                                "RSI ",
+                                r.rsi,
+                                " \u00B7 ",
+                                getRSICat(r.rsi)[1]),
+                            ssc !== null && React.createElement("div", { style: { fontSize: 11, color: ssc >= 105 ? "#22c55e" : "#f97316", marginTop: 2 } },
+                                "SSC ",
+                                ssc,
+                                "%"),
+                            asym !== null && React.createElement("div", { style: { fontSize: 11, color: asym.val > 15 ? "#ef4444" : asym.val > 10 ? "#f97316" : "#22c55e", marginTop: 2 } },
+                                "Asim. ",
+                                asym.val,
+                                "%"),
+                            React.createElement("div", { style: { fontSize: 10, color: C.muted, marginTop: 7 } }, "Tocca per analisi completa.")),
+                        React.createElement("div", { style: { textAlign: "right", minWidth: 82 } },
+                            React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: ((_c = r.cat) === null || _c === void 0 ? void 0 : _c.color) || C.red } },
+                                r.hCm,
+                                React.createElement("span", { style: { fontSize: 12 } }, " cm")),
+                            r.ftMs && React.createElement("div", { style: { fontSize: 11, color: C.muted } },
+                                r.ftMs,
+                                "ms"),
+                            React.createElement("button", { style: Object.assign(Object.assign({}, T.danger), { marginTop: 8, padding: "6px 8px", fontSize: 11 }), onClick: (e) => deleteTest(r, e) }, "\uD83D\uDDD1")))); }),
                 history.length > 0 && React.createElement("div", { style: { marginTop: 14 } },
-                    React.createElement("button", { style: T.ghost, onClick: () => doExport(history) }, "\u2193 Esporta tutto come CSV")))));
+                    React.createElement("button", { style: T.ghost, onClick: () => doExport(history) }, "\u2193 Esporta tutto come CSV"))));
     }
     return null;
 }
