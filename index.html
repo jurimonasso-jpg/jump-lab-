@@ -362,6 +362,8 @@ function JumpLab() {
     const streamRef = useRef(null);
     const mrRef = useRef(null);
     const chunksRef = useRef([]);
+    const recStartRef = useRef(0);
+    const recDurationRef = useRef(0);
     const timerRef = useRef(null);
     const fileInputRef = useRef(null);
     useEffect(() => { try {
@@ -391,8 +393,9 @@ function JumpLab() {
     catch (e) { } }, [goals]);
     const isDJ = jumpType === "DJ";
     const frameTime = 1 / fps;
-    const totalF = Number.isFinite(vidDur) && vidDur > 0 ? Math.floor(vidDur * fps) : 0;
-    const videoReady = totalF > 1;
+    const durationForFrames = Number.isFinite(vidDur) && vidDur > 0 ? vidDur : (recDurationRef.current ? recDurationRef.current / 1000 : 0);
+    const totalF = durationForFrames > 0 ? Math.floor(durationForFrames * fps) : 0;
+    const videoReady = totalF > 1 && !!videoUrl;
     const flightF = takeoff !== null && landing !== null ? Math.abs(landing - takeoff) : null;
     const flightSec = flightF !== null ? flightF / fps : null;
     const heightPrev = flightSec !== null ? Math.round(calcH(flightSec) * 1000) / 10 : null;
@@ -479,21 +482,49 @@ function JumpLab() {
         if (!streamRef.current)
             return;
         chunksRef.current = [];
-        const types = ["video/webm;codecs=vp9", "video/webm", "video/mp4", ""];
-        const mime = types.find(t => !t || MediaRecorder.isTypeSupported(t)) || "";
-        const mr = new MediaRecorder(streamRef.current, mime ? { mimeType: mime } : {});
+        recStartRef.current = Date.now();
+        recDurationRef.current = 0;
+        // Su Android/Chrome il WebM VP9 può dichiararsi supportato ma poi il video può non caricarsi bene.
+        // VP8 è più compatibile per il replay frame-by-frame nel tag <video>.
+        const types = ["video/webm;codecs=vp8", "video/webm;codecs=h264", "video/webm"];
+        const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+        let mr;
+        try {
+            mr = new MediaRecorder(streamRef.current, mime ? { mimeType: mime } : undefined);
+        } catch (e) {
+            setCamErr("Registrazione non supportata da questo browser: " + (e.message || e));
+            return;
+        }
         mrRef.current = mr;
-        mr.ondataavailable = e => { if (e.data.size > 0)
+        mr.ondataavailable = e => { if (e.data && e.data.size > 0)
             chunksRef.current.push(e.data); };
-        mr.onstop = () => { if (videoUrl)
-            URL.revokeObjectURL(videoUrl); setVideoUrl(URL.createObjectURL(new Blob(chunksRef.current, { type: mime || "video/webm" }))); setScreen("review"); };
+        mr.onstop = () => {
+            recDurationRef.current = Math.max(1, Date.now() - recStartRef.current);
+            if (!chunksRef.current.length) {
+                setCamErr("Video non salvato: nessun dato registrato. Riprova dando i permessi alla fotocamera.");
+                return;
+            }
+            if (videoUrl)
+                URL.revokeObjectURL(videoUrl);
+            const blobType = mr.mimeType || mime || "video/webm";
+            const url = URL.createObjectURL(new Blob(chunksRef.current, { type: blobType }));
+            setVideoUrl(url);
+            clearMarkers();
+            setResults(null);
+            setScreen("review");
+        };
         mr.start(100);
         setIsRec(true);
         setRecSec(0);
         timerRef.current = setInterval(() => setRecSec(s => s + 1), 1000);
     };
-    const stopRec = () => { var _a; if (((_a = mrRef.current) === null || _a === void 0 ? void 0 : _a.state) !== "inactive")
-        mrRef.current.stop(); clearInterval(timerRef.current); setIsRec(false); };
+    const stopRec = () => {
+        var _a;
+        clearInterval(timerRef.current);
+        setIsRec(false);
+        if (((_a = mrRef.current) === null || _a === void 0 ? void 0 : _a.state) !== "inactive")
+            mrRef.current.stop();
+    };
     useEffect(() => {
         if (screen !== "review" || !videoRef.current || !videoUrl)
             return;
@@ -504,22 +535,50 @@ function JumpLab() {
         setTakeoff(null);
         setLanding(null);
         setDjFL(null);
-        const readDuration = () => { const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0; if (d > 0)
-            setVidDur(d); };
-        const resetVideo = () => { readDuration(); v.pause(); setIsPlaying(false); try {
+        const readDuration = () => {
+            const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : 0;
+            if (d > 0) {
+                setVidDur(d);
+                return true;
+            }
+            return false;
+        };
+        const fixWebmDuration = () => {
+            // Alcuni WebM registrati con MediaRecorder hanno duration Infinity/NaN/0: senza durata lo slider resta bloccato.
+            if (readDuration())
+                return;
+            const fallback = recDurationRef.current ? recDurationRef.current / 1000 : 0;
+            if (fallback > 0)
+                setVidDur(fallback);
+            try {
+                if (!Number.isFinite(v.duration) || v.duration === 0) {
+                    const backToStart = () => {
+                        v.removeEventListener("seeked", backToStart);
+                        try { v.currentTime = 0; } catch (e) { }
+                        readDuration();
+                        setCurFrame(0);
+                    };
+                    v.addEventListener("seeked", backToStart, { once: true });
+                    v.currentTime = 1e9;
+                }
+            } catch (e) { }
+        };
+        const resetVideo = () => { fixWebmDuration(); v.pause(); setIsPlaying(false); try {
             v.currentTime = 0;
         }
         catch (e) { } setCurFrame(0); };
         const updateFrame = () => { const d = Number.isFinite(v.duration) && v.duration > 0 ? v.duration : vidDur; const maxF = Number.isFinite(d) && d > 0 ? Math.max(0, Math.floor(d * fps) - 1) : 0; setCurFrame(Math.max(0, Math.min(Math.round((v.currentTime || 0) * fps), maxF))); };
         const onEnded = () => setIsPlaying(false);
         v.addEventListener("loadedmetadata", resetVideo);
+        v.addEventListener("loadeddata", fixWebmDuration);
+        v.addEventListener("canplay", fixWebmDuration);
         v.addEventListener("durationchange", readDuration);
         v.addEventListener("timeupdate", updateFrame);
         v.addEventListener("seeked", updateFrame);
         v.addEventListener("ended", onEnded);
         v.src = videoUrl;
         v.load();
-        return () => { v.pause(); v.removeEventListener("loadedmetadata", resetVideo); v.removeEventListener("durationchange", readDuration); v.removeEventListener("timeupdate", updateFrame); v.removeEventListener("seeked", updateFrame); v.removeEventListener("ended", onEnded); };
+        return () => { v.pause(); v.removeEventListener("loadedmetadata", resetVideo); v.removeEventListener("loadeddata", fixWebmDuration); v.removeEventListener("canplay", fixWebmDuration); v.removeEventListener("durationchange", readDuration); v.removeEventListener("timeupdate", updateFrame); v.removeEventListener("seeked", updateFrame); v.removeEventListener("ended", onEnded); };
     }, [screen, videoUrl, fps]);
     const loadVideoFile = useCallback(e => {
         const file = e.target.files && e.target.files[0];
