@@ -271,8 +271,8 @@ const analyzeAthlete = (tests, name) => {
     return { best, latest, first, ssc, asym, strengths: [...new Set(strengths)], weaknesses: [...new Set(weaknesses)], focus: [...new Set(focus)], missing };
 };
 const doExport = hist => {
-    const H = ["Nome", "Sesso", "Età", "Peso(kg)", "Tipo", "Metodo", "Data", "Ora", "Misura(cm)", "T.Volo(ms)", "Frame", "T.Contatto(ms)", "PeakPower(W)", "Pot.Rel(W/kg)", "RSI", "Categoria", "Note"];
-    const rows = hist.map(r => { var _a; return [r.name, r.sex || "", r.age || "", r.weightKg || "", r.jt, r.method || "video", r.date, r.ts, r.hCm, r.ftMs || "", r.flightF || "", r.contactMs || "", r.peakPow || "", r.relPow || "", r.rsi || "", ((_a = r.cat) === null || _a === void 0 ? void 0 : _a.label) || "", (r.notes || []).join(" | ") + (r.coachNote ? ` | ${r.coachNote}` : "")]; });
+    const H = ["Nome", "Sesso", "Età", "Peso(kg)", "Tipo", "Metodo", "Data", "Ora", "Misura(cm)", "Media3(cm)", "N.Prove", "T.Volo(ms)", "Frame", "FPS", "ErroreStimato(cm)", "FonteFPS", "T.Contatto(ms)", "PeakPower(W)", "Pot.Rel(W/kg)", "RSI", "Media3_RSI", "AltezzaBox(cm)", "Categoria", "Note"];
+    const rows = hist.map(r => { var _a; return [r.name, r.sex || "", r.age || "", r.weightKg || "", r.jt, r.method || "video", r.date, r.ts, r.hCm, r.avgHcm || "", r.attemptsN || "", r.ftMs || "", r.flightF || "", r.fpsUsed || "", r.fpsErrorCm || "", r.fpsSource || "", r.contactMs || "", r.peakPow || "", r.relPow || "", r.rsi || "", r.avgRsi || "", r.boxHeightCm || "", ((_a = r.cat) === null || _a === void 0 ? void 0 : _a.label) || "", (r.notes || []).join(" | ") + (r.coachNote ? ` | ${r.coachNote}` : "")]; });
     const csv = "\uFEFF" + [H, ...rows].map(r => r.map(x => String(x).replaceAll(";", ",")).join(";")).join("\n");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -330,6 +330,10 @@ function JumpLab() {
     const [sport, setSport] = useState("");
     const [jumpType, setJumpType] = useState("CMJ");
     const [fps, setFps] = useState(60);
+    const [actualCameraFps, setActualCameraFps] = useState(null);
+    const [videoSource, setVideoSource] = useState("camera");
+    const [fpsSource, setFpsSource] = useState("camera_auto");
+    const [fpsNotice, setFpsNotice] = useState("FPS camera: automatico");
     const [history, setHistory] = useState([]);
     const [goals, setGoals] = useState({});
     const [selectedAthlete, setSelectedAthlete] = useState("");
@@ -357,6 +361,7 @@ function JumpLab() {
     const [boardHeight, setBoardHeight] = useState("");
     const [boardReach, setBoardReach] = useState("");
     const [boardTouch, setBoardTouch] = useState("");
+    const [djBoxHeight, setDjBoxHeight] = useState("30");
     const previewRef = useRef(null);
     const videoRef = useRef(null);
     const streamRef = useRef(null);
@@ -407,6 +412,8 @@ function JumpLab() {
     const currentKey = protocol ? `${protocol.id}_${currentJt}` : "free";
     const currentAttempts = protocol ? (protocolAttempts[currentKey] || []) : [];
     const currentBest = bestOf(currentAttempts);
+    const avgOf = (arr, key) => { const vals = arr.map(x => Number(x[key])).filter(Number.isFinite); return vals.length ? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length * 10) / 10 : null; };
+    const currentMean = currentAttempts.length ? { hCm: avgOf(currentAttempts, "hCm"), rsi: avgOf(currentAttempts, "rsi"), ftMs: avgOf(currentAttempts, "ftMs"), contactMs: avgOf(currentAttempts, "contactMs"), n: currentAttempts.length } : null;
     const targetReps = REPS_TARGET[currentJt] || 3;
     const T = {
         app: { minHeight: "100vh", background: C.black, color: C.white, fontFamily: "system-ui,sans-serif", display: "flex", flexDirection: "column", maxWidth: 500, margin: "0 auto" },
@@ -435,12 +442,42 @@ function JumpLab() {
         const [txt, col] = map[syncSt] || ["", C.muted];
         return React.createElement("span", { style: { fontSize: 11, color: col } }, txt);
     };
+    const normalizeFps = v => {
+        const n = Number(v);
+        if (!Number.isFinite(n) || n <= 0)
+            return null;
+        const presets = [24, 25, 30, 50, 60, 120, 240];
+        const close = presets.find(p => Math.abs(n - p) <= 1.5);
+        return close || Math.round(n * 10) / 10;
+    };
+    const setManualFps = f => {
+        const n = Number(f) || 60;
+        setFps(n);
+        setActualCameraFps(null);
+        setFpsSource(videoSource === "file" ? "file_manual" : "manual");
+        setFpsNotice(`${videoSource === "file" ? "Video importato" : "FPS manuale"}: uso ${n} fps`);
+    };
+    const fpsMeta = () => ({ fpsUsed: fps, fpsErrorCm: errCm(fps), fpsSource, actualCameraFps, videoSource });
     const stopCamera = useCallback(() => { var _a; (_a = streamRef.current) === null || _a === void 0 ? void 0 : _a.getTracks().forEach(t => t.stop()); streamRef.current = null; }, []);
     const startCamera = useCallback(async () => {
         setCamErr("");
+        setVideoSource("camera");
+        setFpsSource("camera_auto");
+        setFpsNotice("Rilevamento FPS camera in corso...");
         try {
-            const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, frameRate: { ideal: fps } }, audio: false });
+            const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, frameRate: { ideal: 60, max: 240 } }, audio: false });
             streamRef.current = s;
+            const track = s.getVideoTracks && s.getVideoTracks()[0];
+            const detected = normalizeFps(track && track.getSettings ? track.getSettings().frameRate : null);
+            if (detected) {
+                setActualCameraFps(detected);
+                setFps(detected);
+                setFpsNotice(`Camera rilevata: ${detected} fps · errore stimato ±${errCm(detected)} cm/frame`);
+            }
+            else {
+                setActualCameraFps(null);
+                setFpsNotice(`FPS camera non rilevato dal browser: uso ${fps} fps. Se il dato sembra strano, carica il video e imposta gli FPS manualmente.`);
+            }
             if (previewRef.current) {
                 previewRef.current.srcObject = s;
                 previewRef.current.play().catch(() => { });
@@ -451,7 +488,7 @@ function JumpLab() {
         }
     }, [fps]);
     useEffect(() => { if (screen === "record")
-        startCamera(); return () => stopCamera(); }, [screen, startCamera, stopCamera]);
+        startCamera(); return () => stopCamera(); }, [screen]);
     const clearMarkers = () => { setTakeoff(null); setLanding(null); setDjFL(null); setCurFrame(0); setVidDur(0); setIsPlaying(false); };
     const applyResultNotes = r => (Object.assign(Object.assign({}, r), { notes: selectedNotes, coachNote: coachNote.trim() }));
     const persistRecord = async (r) => {
@@ -482,6 +519,8 @@ function JumpLab() {
         if (!streamRef.current)
             return;
         chunksRef.current = [];
+        setVideoSource("camera");
+        setFpsSource("camera_auto");
         recStartRef.current = Date.now();
         recDurationRef.current = 0;
         // Su Android/Chrome il WebM VP9 può dichiararsi supportato ma poi il video può non caricarsi bene.
@@ -587,12 +626,17 @@ function JumpLab() {
         if (videoUrl)
             URL.revokeObjectURL(videoUrl);
         stopCamera();
+        setVideoSource("file");
+        setFpsSource("file_manual");
+        setActualCameraFps(null);
+        setFpsNotice(`Video importato: imposta manualmente gli FPS reali del file. Ora uso ${fps} fps.`);
+        recDurationRef.current = 0;
         setVideoUrl(URL.createObjectURL(file));
         clearMarkers();
         setResults(null);
         setScreen("review");
         e.target.value = "";
-    }, [videoUrl, stopCamera]);
+    }, [videoUrl, stopCamera, fps]);
     const goToFrame = useCallback(f => {
         if (!videoReady)
             return;
@@ -623,7 +667,7 @@ function JumpLab() {
         const relPow = peakPow && wKg ? Math.round(peakPow / wKg * 10) / 10 : null;
         const rsi = isDJ && djCSec ? Math.round(calcH(ft) / djCSec * 100) / 100 : null;
         const cat = getCat(hCm, jumpType, sex, age);
-        return { id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: jumpType, method: "video", hCm, ftMs: Math.round(ft * 1000), flightF: Math.abs(landing - takeoff), contactMs: isDJ && djCSec ? Math.round(djCSec * 1000) : null, peakPow, relPow, rsi, cat, notes: [], coachNote: "", ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") };
+        return Object.assign({ id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: jumpType, method: "video", hCm, ftMs: Math.round(ft * 1000), flightF: Math.abs(landing - takeoff), contactMs: isDJ && djCSec ? Math.round(djCSec * 1000) : null, peakPow, relPow, rsi, boxHeightCm: isDJ ? (parseFloat(djBoxHeight) || null) : null, cat, notes: [], coachNote: "", ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") }, fpsMeta());
     };
     const registerAttempt = r => {
         setSelectedNotes([]);
@@ -645,7 +689,7 @@ function JumpLab() {
         const peakPow = wKg ? sayers(hCm, wKg) : null;
         const relPow = peakPow && wKg ? Math.round(peakPow / wKg * 10) / 10 : null;
         const cat = getCat(hCm, jumpType, sex, age);
-        registerAttempt({ id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: jumpType, method: "manual_time", hCm, ftMs: Math.round(ms), flightF: Math.round(ms / 1000 * fps), contactMs: null, peakPow, relPow, rsi: null, cat, notes: [], coachNote: "", ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") });
+        registerAttempt({ id: Date.now(), name: athlete || "Atleta", sex, age: parseInt(age) || null, weightKg: wKg, sport: sport || "", jt: jumpType, method: "manual_time", hCm, ftMs: Math.round(ms), flightF: Math.round(ms / 1000 * fps), contactMs: null, peakPow, relPow, rsi: null, boxHeightCm: jumpType === "DJ" ? (parseFloat(djBoxHeight) || null) : null, cat, notes: [], coachNote: "", ts: new Date().toLocaleTimeString("it-IT"), date: new Date().toLocaleDateString("it-IT") });
         setManualMs("");
     };
     const saveBoard = () => {
@@ -672,26 +716,22 @@ function JumpLab() {
         if (!protocol || !currentBest)
             return;
         const best = results && String(results.id) === String(currentBest.id) ? applyResultNotes(currentBest) : currentBest;
-        const rec = await persistRecord(Object.assign(Object.assign({}, best), { isBest: true, protocolMode: protocol.mode, protocolId: protocol.id, protocolStep: protocol.index + 1 }));
+        const rec = await persistRecord(Object.assign(Object.assign({}, best), {
+            isBest: true, protocolMode: protocol.mode, protocolId: protocol.id, protocolStep: protocol.index + 1,
+            avgHcm: currentMean ? currentMean.hCm : null,
+            avgRsi: currentMean ? currentMean.rsi : null,
+            avgFtMs: currentMean ? currentMean.ftMs : null,
+            avgContactMs: currentMean ? currentMean.contactMs : null,
+            attemptsN: currentMean ? currentMean.n : currentAttempts.length
+        }));
         setLastSavedBest(rec);
         setProtocolAttempts(p => { const copy = Object.assign({}, p); delete copy[currentKey]; return copy; });
-        setSelectedNotes([]);
-        setCoachNote("");
-        setResults(null);
-        clearMarkers();
+        setSelectedNotes([]); setCoachNote(""); setResults(null); clearMarkers();
         if (protocol.index < protocol.tests.length - 1) {
-            const nextIndex = protocol.index + 1;
-            const nextJt = protocol.tests[nextIndex];
-            setProtocol(Object.assign(Object.assign({}, protocol), { index: nextIndex }));
-            setJumpType(nextJt);
-            setScreen("protocol");
-        }
-        else {
-            const name = protocol.athlete || rec.name;
-            setProtocol(null);
-            setProtocolAttempts({});
-            setSelectedAthlete(name);
-            setScreen("athlete");
+            const nextIndex = protocol.index + 1; const nextJt = protocol.tests[nextIndex];
+            setProtocol(Object.assign(Object.assign({}, protocol), { index: nextIndex })); setJumpType(nextJt); setScreen("protocol");
+        } else {
+            const name = protocol.athlete || rec.name; setProtocol(null); setProtocolAttempts({}); setSelectedAthlete(name); setScreen("athlete");
         }
     };
     const repeatAttempt = () => {
@@ -729,6 +769,23 @@ function JumpLab() {
         const ok = await cloudDelete(r.id);
         setSyncSt(ok ? "saved" : "local");
         setCloudMsg(ok ? "Prova cancellata" : "Cancellata solo localmente");
+        setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 3500);
+    };
+    const updateDJBoxHeight = async (r, e) => {
+        var _a; (_a = e === null || e === void 0 ? void 0 : e.stopPropagation) === null || _a === void 0 ? void 0 : _a.call(e);
+        if (!r || r.jt !== "DJ") return;
+        const val = window.prompt("Altezza box Drop Jump (cm)", r.boxHeightCm || djBoxHeight || "30");
+        if (val === null) return;
+        const cm = parseFloat(String(val).replace(",", "."));
+        if (!cm || cm <= 0) { window.alert("Inserisci un valore valido in cm, es. 30"); return; }
+        const updated = Object.assign(Object.assign({}, r), { boxHeightCm: Math.round(cm * 10) / 10 });
+        setHistory(h => h.map(x => String(x.id) === String(r.id) ? updated : x));
+        if (results && String(results.id) === String(r.id)) setResults(updated);
+        setDjBoxHeight(String(updated.boxHeightCm));
+        setSyncSt("saving");
+        const ok = await cloudSave(updated);
+        setSyncSt(ok ? "saved" : "local");
+        setCloudMsg(ok ? "Altezza box aggiornata" : "Altezza box aggiornata solo localmente");
         setTimeout(() => { setSyncSt("idle"); setCloudMsg(""); }, 3500);
     };
     const deleteAthlete = async (name) => {
@@ -774,6 +831,24 @@ function JumpLab() {
                 React.createElement("div", { style: { display: "inline-block", marginTop: 10, padding: "5px 18px", borderRadius: 20, background: (((_b = r.cat) === null || _b === void 0 ? void 0 : _b.color) || C.muted) + "22", color: ((_c = r.cat) === null || _c === void 0 ? void 0 : _c.color) || C.muted, fontWeight: 700, fontSize: 13 } }, ((_d = r.cat) === null || _d === void 0 ? void 0 : _d.label) || "N/D")),
             React.createElement("div", { style: T.card({ marginBottom: 14 }) },
                 React.createElement(NormBar, { jt: r.jt, sex: r.sex, age: r.age, hCm: r.hCm })),
+            r.jt === "DJ" && React.createElement("div", { style: T.card({ marginBottom: 14, border: `1px solid ${r.boxHeightCm ? C.g3 : C.red + "66"}` }) },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 } },
+                    React.createElement("div", null,
+                        React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 2, textTransform: "uppercase", letterSpacing: 1 } }, "Altezza box"),
+                        React.createElement("div", { style: { fontSize: 24, fontWeight: 900, color: r.boxHeightCm ? C.white : C.red } }, r.boxHeightCm ? `${r.boxHeightCm} cm` : "Non inserita")),
+                    React.createElement("button", { style: T.small, onClick: e => updateDJBoxHeight(r, e) }, r.boxHeightCm ? "Modifica" : "Aggiungi"))),
+            r.fpsUsed && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, "FPS usati per il calcolo"),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 } },
+                    React.createElement("div", { style: { fontSize: 24, fontWeight: 900, color: C.white } }, `${r.fpsUsed} fps`),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted, textAlign: "right", lineHeight: 1.45 } },
+                        `±${r.fpsErrorCm || errCm(r.fpsUsed)} cm/frame`,
+                        React.createElement("br", null),
+                        r.fpsSource === "camera_auto" ? "camera auto" : r.fpsSource === "file_manual" ? "file manuale" : "manuale"))),
+            r.avgHcm && React.createElement("div", { style: T.card({ marginBottom: 14, background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.35)" }) },
+                React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, `Media ${r.attemptsN || 3} prove`),
+                React.createElement("div", { style: { fontSize: 28, fontWeight: 900 } }, r.avgHcm, " cm", r.avgRsi ? ` · RSI ${r.avgRsi}` : ""),
+                React.createElement("div", { style: { fontSize: 12, color: C.muted, marginTop: 4 } }, "Il risultato principale resta il migliore; la media aiuta a leggere la stabilità del test.")),
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 } },
                 r.ftMs !== null && r.ftMs !== undefined && React.createElement("div", { style: T.card({ textAlign: "center" }) },
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 3 } }, "TEMPO DI VOLO"),
@@ -888,20 +963,26 @@ function JumpLab() {
                     React.createElement("div", { style: { fontSize: 11, color: C.muted, lineHeight: 1.55 } },
                         "Batteria consigliata: ",
                         BATTERY_ORDER.map(j => TEST_MAP[j].label).join(" → "),
-                        ". Ogni test \u00E8 guidato su 3 prove e salva automaticamente solo il migliore.")),
+                        ". Ogni test è guidato su 3 prove: salva il migliore e registra anche la media.")),
                 React.createElement("div", { style: T.sec },
                     React.createElement("label", { style: T.lbl }, "Test singolo da guidare"),
                     React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7 } }, JT.map(jt => React.createElement("button", { key: jt.id, style: T.pill(jumpType === jt.id), onClick: () => setJumpType(jt.id) }, jt.label))),
                     React.createElement("div", { style: { fontSize: 12, color: C.muted, marginTop: 6 } }, (_a = TEST_MAP[jumpType]) === null || _a === void 0 ? void 0 : _a.desc)),
                 React.createElement("div", { style: T.sec },
-                    React.createElement("label", { style: T.lbl }, "Frame rate camera"),
-                    React.createElement("div", { style: { display: "flex", gap: 7, flexWrap: "wrap" } }, [30, 60, 120, 240].map(f => React.createElement("button", { key: f, style: T.pill(fps === f), onClick: () => setFps(f) },
+                    React.createElement("label", { style: T.lbl }, "Frame rate"),
+                    React.createElement("div", { style: T.card({ padding: 12, marginBottom: 8 }) },
+                        React.createElement("div", { style: { fontSize: 13, fontWeight: 800, color: C.white, marginBottom: 4 } }, "Registrazione interna: FPS automatico"),
+                        React.createElement("div", { style: { fontSize: 12, color: C.muted, lineHeight: 1.5 } }, fpsNotice || "L'app prova a leggere gli FPS reali dalla fotocamera quando apri la registrazione.")),
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 } }, "Video importato: scegli manualmente"),
+                    React.createElement("div", { style: { display: "flex", gap: 7, flexWrap: "wrap" } }, [30, 60, 120, 240].map(f => React.createElement("button", { key: f, style: T.pill(fps === f && videoSource === "file"), onClick: () => { setVideoSource("file"); setManualFps(f); } },
                         f,
                         " fps"))),
                     React.createElement("div", { style: { fontSize: 12, color: C.muted, marginTop: 6 } },
-                        "Risoluzione \u00B1",
+                        "FPS attuali usati nei calcoli: ",
+                        React.createElement("strong", { style: { color: C.white } }, fps),
+                        " · errore stimato ±",
                         errCm(fps),
-                        " cm/frame \u00B7 ",
+                        " cm/frame · ",
                         (1000 / fps).toFixed(1),
                         " ms/frame")),
                 React.createElement("input", { ref: fileInputRef, type: "file", accept: "video/*", style: { display: "none" }, onChange: loadVideoFile }),
@@ -911,9 +992,9 @@ function JumpLab() {
                         cloudMsg ? ` (${cloudMsg})` : ""),
                     history.length > 0 && React.createElement("button", { style: T.ghost, onClick: () => doExport(history) }, "\u2193 CSV")),
                 React.createElement("div", { style: T.info },
-                    React.createElement("strong", { style: { color: C.white } }, "Nuovo in v1.4.1"),
+                    React.createElement("strong", { style: { color: C.white } }, "Nuovo in v1.5.1"),
                     React.createElement("br", null),
-                    "Scheda atleta, punti forti/deboli, obiettivi, confronto prima/dopo, note precompilate, Broad Jump manuale e scelta fra batteria completa o test singolo guidato."))));
+                    "FPS automatico da fotocamera, scelta manuale per video importati, altezza box DJ retroattiva e media delle prove affiancata al migliore."))));
     // PROTOCOL
     if (screen === "protocol" && protocol) {
         const jt = currentJt;
@@ -942,6 +1023,11 @@ function JumpLab() {
                     React.createElement("div", { style: { fontSize: 28, fontWeight: 900, color: C.red, marginBottom: 4 } }, info.label),
                     React.createElement("div", { style: { fontSize: 13, color: C.white, marginBottom: 8 } }, info.desc),
                     React.createElement("div", { style: { fontSize: 12, color: C.muted, lineHeight: 1.55 } }, info.guide)),
+                jt === "DJ" && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("label", { style: T.lbl }, "Altezza box Drop Jump (cm)"),
+                    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, marginBottom: 8 } }, [20, 30, 40, 50].map(v => React.createElement("button", { key: v, style: T.pill(Number(djBoxHeight) === v), onClick: () => setDjBoxHeight(String(v)) }, `${v}`))),
+                    React.createElement("input", { style: T.inp, type: "number", value: djBoxHeight, onChange: e => setDjBoxHeight(e.target.value), placeholder: "es. 30" }),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 6, lineHeight: 1.45 } }, "Non cambia la formula RSI, ma rende confrontabili i Drop Jump fatti da altezze diverse.")),
                 React.createElement("div", { style: T.card({ marginBottom: 14 }) },
                     React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
                         React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, "Prove"),
@@ -949,7 +1035,7 @@ function JumpLab() {
                             attempts.length,
                             "/",
                             targetReps)),
-                    attempts.length === 0 ? React.createElement("div", { style: { fontSize: 12, color: C.muted } }, "Nessun tentativo registrato. Fai 3 prove, poi l'app salver\u00E0 solo il migliore.") : attempts.map((r, i) => React.createElement("div", { key: r.id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i ? `1px solid ${C.g3}` : "none" } },
+                    attempts.length === 0 ? React.createElement("div", { style: { fontSize: 12, color: C.muted } }, "Nessun tentativo registrato. Fai 3 prove: l'app salverà il migliore e anche la media.") : attempts.map((r, i) => React.createElement("div", { key: r.id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i ? `1px solid ${C.g3}` : "none" } },
                         React.createElement("div", { style: { fontSize: 12 } },
                             "Prova ",
                             i + 1,
@@ -970,6 +1056,10 @@ function JumpLab() {
                         _b.label,
                         " \u00B7 prova ",
                         attempts.findIndex(x => String(x.id) === String(currentBest.id)) + 1)),
+                currentMean && React.createElement("div", { style: T.card({ marginBottom: 14, background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.35)" }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, textTransform: "uppercase", letterSpacing: 1 } }, `Media provvisoria ${currentMean.n} prove`),
+                    React.createElement("div", { style: { fontSize: 24, fontWeight: 900 } }, currentMean.hCm, " cm", currentMean.rsi ? ` · RSI ${currentMean.rsi}` : ""),
+                    React.createElement("div", { style: { fontSize: 12, color: C.muted, marginTop: 4 } }, currentMean.n < targetReps ? "Dato provvisorio: completa le 3 prove." : "Dato più stabile da affiancare al migliore.")),
                 jt === "BOARD" ? (React.createElement("button", { style: T.btn(false), onClick: () => setScreen("board") }, "\uD83C\uDFC1 INSERISCI BROAD JUMP")) : (React.createElement(React.Fragment, null,
                     React.createElement("button", { style: T.btn(false), onClick: () => { setJumpType(jt); setScreen("record"); } }, "\uD83D\uDCF9 REGISTRA PROVA"),
                     React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 } },
@@ -977,7 +1067,7 @@ function JumpLab() {
                         React.createElement("button", { style: T.ghost, onClick: () => { setJumpType(jt); setScreen("manual"); } }, "\u23F1 Manuale")))),
                 React.createElement("input", { ref: fileInputRef, type: "file", accept: "video/*", style: { display: "none" }, onChange: loadVideoFile }),
                 React.createElement("div", { style: { marginTop: 14 } },
-                    React.createElement("button", { style: T.btn(!currentBest), disabled: !currentBest, onClick: saveBestAndNext }, protocol.index < protocol.tests.length - 1 ? "💾 SALVA MIGLIORE E CONTINUA" : "💾 SALVA MIGLIORE E CHIUDI")),
+                    React.createElement("button", { style: T.btn(!currentBest), disabled: !currentBest, onClick: saveBestAndNext }, protocol.index < protocol.tests.length - 1 ? "💾 SALVA MIGLIORE + MEDIA E CONTINUA" : "💾 SALVA MIGLIORE + MEDIA E CHIUDI")),
                 lastSavedBest && React.createElement("div", { style: T.info },
                     "Ultimo migliore salvato: ",
                     React.createElement("strong", { style: { color: C.white } },
@@ -1021,6 +1111,14 @@ function JumpLab() {
             React.createElement("div", { style: T.body },
                 React.createElement("div", { style: { background: "#000", borderRadius: 8, overflow: "hidden", marginBottom: 14 } },
                     React.createElement("video", { ref: videoRef, style: { width: "100%", display: "block" }, playsInline: true, preload: "auto" })),
+                videoSource === "file" && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 } }, "FPS video importato"),
+                    React.createElement("div", { style: { display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 8 } }, [30, 60, 120, 240].map(f => React.createElement("button", { key: f, style: T.pill(fps === f), onClick: () => setManualFps(f) }, `${f} fps`))),
+                    React.createElement("input", { style: T.inp, type: "number", value: fps, onChange: e => setManualFps(e.target.value), placeholder: "FPS reale del video" }),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 6, lineHeight: 1.45 } }, "Per video caricati dalla galleria il browser spesso non legge gli FPS reali: qui va impostato il valore con cui è stato registrato il video.")),
+                videoSource === "camera" && React.createElement("div", { style: T.card({ marginBottom: 14 }) },
+                    React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 } }, "FPS camera rilevati"),
+                    React.createElement("div", { style: { fontSize: 13, color: C.white, lineHeight: 1.5 } }, fpsNotice || `Uso ${fps} fps`)),
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12, color: C.muted, marginBottom: 8 } },
                     React.createElement("span", null,
                         "Frame: ",
@@ -1038,6 +1136,10 @@ function JumpLab() {
                     React.createElement("button", { style: Object.assign(Object.assign({}, T.navB), { flex: 1.1, opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: togglePlay }, isPlaying ? "⏸ Pausa" : "▶ Play"),
                     [["«10", -10], ["‹1", -1], ["1›", 1], ["10»", 10]].map(([l, d]) => React.createElement("button", { key: l, style: Object.assign(Object.assign({}, T.navB), { opacity: videoReady ? 1 : 0.4 }), disabled: !videoReady, onClick: () => goToFrame(curFrame + d) }, l))),
                 isDJ ? React.createElement("div", { style: { marginBottom: 14 } },
+                    React.createElement("div", { style: T.card({ marginBottom: 10 }) },
+                        React.createElement("label", { style: T.lbl }, "Altezza box Drop Jump (cm)"),
+                        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6, marginBottom: 8 } }, [20, 30, 40, 50].map(v => React.createElement("button", { key: v, style: T.pill(Number(djBoxHeight) === v), onClick: () => setDjBoxHeight(String(v)) }, `${v}`))),
+                        React.createElement("input", { style: T.inp, type: "number", value: djBoxHeight, onChange: e => setDjBoxHeight(e.target.value), placeholder: "es. 30" })),
                     React.createElement("div", { style: { fontSize: 10, color: C.muted, marginBottom: 6 } }, "DROP JUMP \u2014 segna nell'ordine \u2193"),
                     React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
                         React.createElement("button", { onClick: () => setDjFL(curFrame), style: T.mk2B(djFL !== null, "#92400e") },
@@ -1089,7 +1191,8 @@ function JumpLab() {
                         "Tempo di volo: ",
                         Math.round(flightSec * 1000),
                         "ms",
-                        rsiPrev !== null ? ` · RSI: ${rsiPrev}` : "")),
+                        rsiPrev !== null ? ` · RSI: ${rsiPrev}` : ""),
+                    React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 4 } }, `FPS usati: ${fps} · errore stimato ±${errCm(fps)} cm/frame`)),
                 React.createElement("button", { style: T.btn(!reviewReady), disabled: !reviewReady, onClick: calculate }, "REGISTRA TENTATIVO \u2192"),
                 React.createElement("div", { style: T.info },
                     React.createElement("strong", { style: { color: C.white } }, "Tip:"),
@@ -1319,6 +1422,10 @@ function JumpLab() {
                             React.createElement("div", { style: { fontSize: 11, color: ((_a = r.cat) === null || _a === void 0 ? void 0 : _a.color) || C.muted, marginTop: 4, fontWeight: 700 } },
                                 "Categoria: ",
                                 ((_b = r.cat) === null || _b === void 0 ? void 0 : _b.label) || "N/D"),
+                            r.avgHcm && React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 3 } }, "Media ", r.attemptsN || 3, " prove: ", r.avgHcm, " cm", r.avgRsi ? ` · RSI ${r.avgRsi}` : ""),
+                            r.jt === "DJ" && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 6 } },
+                                React.createElement("span", { style: { fontSize: 11, color: r.boxHeightCm ? C.muted : C.red } }, r.boxHeightCm ? `Box: ${r.boxHeightCm} cm` : "Box: non inserito"),
+                                React.createElement("button", { style: Object.assign(Object.assign({}, T.small), { padding: "5px 8px", fontSize: 11 }), onClick: e => updateDJBoxHeight(r, e) }, r.boxHeightCm ? "Modifica" : "Aggiungi")),
                             r.relPow && React.createElement("div", { style: { fontSize: 11, color: C.muted, marginTop: 2 } },
                                 r.peakPow,
                                 "W \u00B7 ",
